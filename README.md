@@ -63,6 +63,11 @@ To get a local copy up and running follow these simple steps.
 
 ### Prerequisites
 
+This project depends on a trained text classification model, which is hosted on [Hugging Face](https://huggingface.co/). You can either train your own model or use the one provided by JOSA. The model is defined in environment variables, which are passed to the application at runtime:
+1. HUGGINGFACE_TOKEN: The Hugging Face API token.
+2. MODEL_PATH: The model path on Hugging Face.
+3. MODEL_VERSION: The model version on Hugging Face.
+
 ### Installation
 
 1. Clone the repo
@@ -71,7 +76,25 @@ To get a local copy up and running follow these simple steps.
    git clone https://github.com/jordanopensource/nuha-api.git
    ```
 
-2.
+2. Create a virtual environment
+
+   ```sh
+   python3 -m venv venv
+   ```
+
+3. Activate the virtual environment
+
+   ```sh
+    source venv/bin/activate
+    ```
+
+4. Install the dependencies
+
+   ```sh
+   pip install -r requirements.txt
+   ```
+
+
 
 ### Running
 
@@ -79,13 +102,34 @@ To get a local copy up and running follow these simple steps.
 
 To run the project locally for development purposes:
 
-1.
+1. Activate the virtual environment
+
+   ```sh
+    source venv/bin/activate
+    ```
+
+2. Run the project
+   ```sh
+    HUGGINGFACE_TOKEN="" MODEL_PATH="" MODEL_VERSION="" uvicorn app.main:app --reload
+    ```
 
 #### Production
 
 To build and run the project locally for production purposes:
 
-1.
+1. Build the Docker image
+
+   ```sh
+   docker build -t nuha-api .
+   ```
+
+2. Run the Docker container
+
+   ```sh
+    docker run -d -p 8000:8000 -e HUGGINGFACE_TOKEN="" -e MODEL_PATH="" -e MODEL_VERSION="" nuha-api
+    ```
+
+
 
 ___
 
