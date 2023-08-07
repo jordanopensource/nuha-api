@@ -17,3 +17,5 @@ class PredictionResponse(BaseModel):
     label: Literal["hate-speech", "non-hate-speech"]
     score: float
     model_version: str
+    comment: str
+    post: str

@@ -32,8 +32,13 @@ def predict(
     model = request.app.state.model
 
     results = model.predict([c.comment for c in comments])
-
     return [
-        {"label": r[0], "score": r[1], "model_version": model.model_version}
-        for r in results
+        {
+            "label": results[i][0],
+            "score": results[i][1],
+            "model_version": model.model_version,
+            "comment": comments[i].comment,
+            "post": comments[i].post,
+        }
+        for i in range(len(results))
     ]
