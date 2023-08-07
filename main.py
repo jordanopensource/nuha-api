@@ -25,15 +25,20 @@ def on_startup():
 
 
 @app.post("/predict")
-def predict(
+async def predict(
     request: Request, comments: list[PredictionRequest]
 ) -> list[PredictionResponse]:
     """Classify comments into hatespeech or not."""
     model = request.app.state.model
 
     results = model.predict([c.comment for c in comments])
-
     return [
-        {"label": r[0], "score": r[1], "model_version": model.model_version}
-        for r in results
+        {
+            "label": results[i][0],
+            "score": results[i][1],
+            "model_version": model.model_version,
+            "comment": comments[i].comment,
+            "post": comments[i].post,
+        }
+        for i in range(len(results))
     ]
