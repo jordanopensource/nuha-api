@@ -19,6 +19,7 @@ def on_startup():
     model_path = os.environ.get("MODEL_PATH")
     model_version = os.environ.get("MODEL_VERSION")
     huggingface_token = os.environ.get("HUGGINGFACE_TOKEN")
+    app.state.apiToken = os.environ.get("API_TOKEN")
 
     huggingface_hub.login(token=huggingface_token)
     app.state.model = Nuha(model_path=model_path, model_version=model_version)
@@ -26,11 +27,11 @@ def on_startup():
 
 @app.post("/predict")
 async def predict(
-        request: Request, authorization: Annotated[str | None, Header()], comments: list[PredictionRequest],
-        response: Response
+        request: Request, authorization: Annotated[str | None, Header()],
+        comments: list[PredictionRequest], response: Response
 ) -> list[PredictionResponse]:
     """check for valid API token first."""
-    if len(authorization) == 0 or authorization[len("Bearer "):] != os.environ.get("API_TOKEN"):
+    if len(authorization) == 0 or authorization[len("Bearer "):] != request.app.state.apiToken:
         response.status_code = status.HTTP_401_UNAUTHORIZED
         return []
 
