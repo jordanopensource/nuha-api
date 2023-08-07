@@ -25,7 +25,7 @@ def on_startup():
 
 
 @app.post("/predict")
-async def predict(
+def predict(
     request: Request, comments: list[PredictionRequest]
 ) -> list[PredictionResponse]:
     """Classify comments into hatespeech or not."""
