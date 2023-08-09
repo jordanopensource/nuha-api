@@ -39,5 +39,4 @@ class Nuha:
             list of labels and scores for each comment
         """
         output = self.classifier(batch, batch_size=self.BATCH_SIZE)
-        print(output)
         return [(o["label"], o["score"]) for o in output]
