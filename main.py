@@ -5,7 +5,7 @@ from fastapi.requests import Request
 import huggingface_hub
 
 from src.interface import PredictionRequest, PredictionResponse
-from src.model import Nuha
+from src.model import Nuha, PredictionResult
 
 app = FastAPI(
     title="Nuha API",
@@ -31,14 +31,16 @@ def predict(
     """Classify comments into hatespeech or not."""
     model = request.app.state.model
 
+    results: list[PredictionResult]
     results = model.predict([c.comment for c in comments])
+
     return [
         {
-            "label": results[i][0],
-            "score": results[i][1],
+            "label": result.label,
+            "score": result.score,
             "model_version": model.model_version,
-            "comment": comments[i].comment,
-            "post": comments[i].post,
+            "comment": comment.comment,
+            "post": comment.post,
         }
-        for i in range(len(results))
+        for result, comment in zip(results, comments)
     ]
