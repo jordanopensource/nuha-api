@@ -1,8 +1,17 @@
 """Model for Nuha."""
+from dataclasses import dataclass
 from typing import Literal
-from transformers import AutoTokenizer
-from optimum.pipelines import pipeline
 from optimum.onnxruntime import ORTModelForSequenceClassification
+from optimum.pipelines import pipeline
+from transformers import AutoTokenizer
+
+
+@dataclass
+class PredictionResult:
+    """Model prediction result."""
+
+    label: Literal["hatespeech", "non-hatespeech"]
+    score: float
 
 
 class Nuha:
@@ -29,14 +38,12 @@ class Nuha:
             device=self.device,
         )
 
-    def predict(
-        self, batch: list[str]
-    ) -> list[tuple[Literal["hatespeech", "non-hatespeech"], float]]:
+    def predict(self, batch: list[str]) -> list[PredictionResult]:
         """Run model inference on a batch of comments.
 
         Returns:
-            list[tuple[Literal["hatespeech", "non-hatespeech"], float]]:
-            list of labels and scores for each comment
+            list[PredictionResult]: list of labels and scores for each comment
         """
         output = self.classifier(batch, batch_size=self.BATCH_SIZE)
-        return [(o["label"], o["score"]) for o in output]
+        print(output)
+        return [PredictionResult(label=o["label"], score=o["score"]) for o in output]
