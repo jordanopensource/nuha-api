@@ -23,6 +23,9 @@ def on_startup():
     huggingface_hub.login(token=huggingface_token)
     app.state.model = Nuha(model_path=model_path, model_version=model_version)
 
+@app.get('/healthcheck')
+def healthcheck(request: Request):
+  return 'A healthy response'
 
 @app.post("/predict")
 def predict(
