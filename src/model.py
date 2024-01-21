@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 class PredictionResult:
     """Model prediction result."""
 
-    label: Literal["hatespeech", "non-hatespeech"]
+    label: Literal["offensive-language", "not-online-violence", "gender-based-violence"]
     score: float
 
 
@@ -46,4 +46,9 @@ class Nuha:
         """
         output = self.classifier(batch, batch_size=self.BATCH_SIZE)
         print(output)
-        return [PredictionResult(label=o["label"], score=o["score"]) for o in output]
+        return [
+            PredictionResult(
+                label=o["label"].lower().replace(" ", "-"), score=o["score"]
+            )
+            for o in output
+        ]
