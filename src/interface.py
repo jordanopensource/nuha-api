@@ -14,7 +14,7 @@ class PredictionRequest(BaseModel):
 class PredictionResponse(BaseModel):
     """Single instance of comment prediction"""
 
-    label: Literal["hate-speech", "non-hate-speech"]
+    label: Literal["offensive-language", "not-online-violence", "gender-based-violence"]
     score: float
     model_version: str
     comment: str
