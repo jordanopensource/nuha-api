@@ -1,0 +1,5 @@
+venv
+.*
+*.md
+LICENSE
+__pycache__
