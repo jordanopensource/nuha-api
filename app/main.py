@@ -30,7 +30,8 @@ class ClassifyRequest(BaseModel):
 class ClassifyResponse(BaseModel):
     """Response for single text classification."""
 
-    label: str = Field(description="Classification label")
+    sub_class: str = Field(description="Classification sub_class")
+    main_class: str = Field(description="Classification main_class")
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
@@ -100,10 +101,10 @@ async def classify_single(
     """
     Classify a single text.
 
-    Returns the predicted class label and confidence score.
+    Returns the predicted label and confidence score.
     """
     result = await get_classification(request.text)
-    return ClassifyResponse(label=result.label, confidence=result.confidence)
+    return ClassifyResponse(sub_class=result.sub_class, main_class=result.main_class, confidence=result.confidence)
 
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse, tags=["Classification"])
@@ -118,5 +119,5 @@ async def classify_batch(
     """
     results = await get_classifications_batch(request.texts)
     return BatchClassifyResponse(
-        results=[ClassifyResponse(label=r.label, confidence=r.confidence) for r in results]
+        results=[ClassifyResponse(sub_class=r.sub_class, main_class=r.main_class, confidence=r.confidence) for r in results]
     )

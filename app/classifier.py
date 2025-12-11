@@ -21,7 +21,8 @@ _executor = ThreadPoolExecutor(max_workers=_max_workers)
 class ClassificationResult:
     """Result of a text classification."""
 
-    label: str
+    sub_class: str
+    main_clsss: str
     confidence: float
 
 
@@ -81,17 +82,18 @@ def _predict_single(text: str) -> ClassificationResult:
     cleaned = _clean_text(text)
 
     if not cleaned:
-        return ClassificationResult(label=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
+        return ClassificationResult(sub_class=_INVALID_LABEL, main_clsss=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
 
     model = load_model()
 
     # TODO: Replace with actual inference
     # prediction = model.predict([cleaned])
-    # label, confidence = prediction[0], prediction[1]
+    # sub_class, main_class, confidence = prediction[0], _PLACEHOLDER_LABEL, prediction[1]
     _ = model, cleaned  # Acknowledge to avoid linter warnings
 
     return ClassificationResult(
-        label=_PLACEHOLDER_LABEL,
+        sub_class=_PLACEHOLDER_LABEL,
+        main_class=_PLACEHOLDER_LABEL,
         confidence=_PLACEHOLDER_CONFIDENCE,
     )
 
@@ -111,7 +113,7 @@ def _predict_batch(texts: list[str]) -> list[ClassificationResult]:
 
     # Initialize all results as invalid
     results: list[ClassificationResult] = [
-        ClassificationResult(label=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
+        ClassificationResult(sub_class=_INVALID_LABEL, main_class=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
         for _ in texts
     ]
 
@@ -123,15 +125,17 @@ def _predict_batch(texts: list[str]) -> list[ClassificationResult]:
         # predictions = model.predict(valid_texts)
         # for i, idx in enumerate(valid_indices):
         #     results[idx] = ClassificationResult(
-        #         label=predictions[i][0],
-        #         confidence=predictions[i][1],
+        #         sub_class=predictions[i][0],
+        #         main_class=_PLACEHOLDER_LABEL,
+        #         confidence=predictions[i][1]
         #     )
         _ = model  # Acknowledge to avoid linter warnings
 
         for idx in valid_indices:
             results[idx] = ClassificationResult(
-                label=_PLACEHOLDER_LABEL,
-                confidence=_PLACEHOLDER_CONFIDENCE,
+                sub_class=_PLACEHOLDER_LABEL,
+                main_class=_PLACEHOLDER_LABEL,
+                confidence=_PLACEHOLDER_CONFIDENCE
             )
 
     return results
