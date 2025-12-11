@@ -101,7 +101,7 @@ async def classify_single(
     """
     Classify a single text.
 
-    Returns the predicted label and confidence score.
+    Returns the predicted sub_class, main_class, and confidence score.
     """
     result = await get_classification(request.text)
     return ClassifyResponse(sub_class=result.sub_class, main_class=result.main_class, confidence=result.confidence)
