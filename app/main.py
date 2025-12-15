@@ -30,9 +30,10 @@ class ClassifyRequest(BaseModel):
 class ClassifyResponse(BaseModel):
     """Response for single text classification."""
 
-    sub_class: str = Field(description="Classification sub_class")
-    main_class: str = Field(description="Classification main_class")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score (0-1)")
+    is_valid: bool = Field(description="Whether the input text was valid for classification")
+    sub_class: str | None = Field(description="Classification sub_class (null if invalid)")
+    main_class: str | None = Field(description="Classification main_class (null if invalid)")
+    confidence: float | None = Field(ge=0.0, le=1.0, description="Confidence score 0-1 (null if invalid)")
 
 
 class BatchClassifyRequest(BaseModel):
@@ -104,7 +105,7 @@ async def classify_single(
     Returns the predicted sub_class, main_class, and confidence score.
     """
     result = await get_classification(request.text)
-    return ClassifyResponse(sub_class=result.sub_class, main_class=result.main_class, confidence=result.confidence)
+    return ClassifyResponse(is_valid=result.is_valid, sub_class=result.sub_class, main_class=result.main_class, confidence=result.confidence)
 
 
 @app.post("/classify/batch", response_model=BatchClassifyResponse, tags=["Classification"])
@@ -119,5 +120,5 @@ async def classify_batch(
     """
     results = await get_classifications_batch(request.texts)
     return BatchClassifyResponse(
-        results=[ClassifyResponse(sub_class=r.sub_class, main_class=r.main_class, confidence=r.confidence) for r in results]
+        results=[ClassifyResponse(is_valid=r.is_valid, sub_class=r.sub_class, main_class=r.main_class, confidence=r.confidence) for r in results]
     )

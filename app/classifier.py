@@ -21,17 +21,15 @@ _executor = ThreadPoolExecutor(max_workers=_max_workers)
 class ClassificationResult:
     """Result of a text classification."""
 
-    sub_class: str
-    main_clsss: str
-    confidence: float
+    is_valid: bool
+    sub_class: str | None
+    main_class: str | None
+    confidence: float | None
 
 
 # Placeholder values - replace with actual model classes when ready
 _PLACEHOLDER_LABEL = "neutral"
 _PLACEHOLDER_CONFIDENCE = 0.0
-
-_INVALID_LABEL = "invalid"
-_INVALID_CONFIDENCE = 1.0
 
 
 @lru_cache(maxsize=1)
@@ -82,7 +80,7 @@ def _predict_single(text: str) -> ClassificationResult:
     cleaned = _clean_text(text)
 
     if not cleaned:
-        return ClassificationResult(sub_class=_INVALID_LABEL, main_clsss=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
+        return ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
 
     model = load_model()
 
@@ -92,6 +90,7 @@ def _predict_single(text: str) -> ClassificationResult:
     _ = model, cleaned  # Acknowledge to avoid linter warnings
 
     return ClassificationResult(
+        is_valid=True,
         sub_class=_PLACEHOLDER_LABEL,
         main_class=_PLACEHOLDER_LABEL,
         confidence=_PLACEHOLDER_CONFIDENCE,
@@ -113,7 +112,7 @@ def _predict_batch(texts: list[str]) -> list[ClassificationResult]:
 
     # Initialize all results as invalid
     results: list[ClassificationResult] = [
-        ClassificationResult(sub_class=_INVALID_LABEL, main_class=_INVALID_LABEL, confidence=_INVALID_CONFIDENCE)
+        ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
         for _ in texts
     ]
 
@@ -125,6 +124,7 @@ def _predict_batch(texts: list[str]) -> list[ClassificationResult]:
         # predictions = model.predict(valid_texts)
         # for i, idx in enumerate(valid_indices):
         #     results[idx] = ClassificationResult(
+        #         is_valid=True,
         #         sub_class=predictions[i][0],
         #         main_class=_PLACEHOLDER_LABEL,
         #         confidence=predictions[i][1]
@@ -133,6 +133,7 @@ def _predict_batch(texts: list[str]) -> list[ClassificationResult]:
 
         for idx in valid_indices:
             results[idx] = ClassificationResult(
+                is_valid=True,
                 sub_class=_PLACEHOLDER_LABEL,
                 main_class=_PLACEHOLDER_LABEL,
                 confidence=_PLACEHOLDER_CONFIDENCE
