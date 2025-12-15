@@ -39,7 +39,13 @@ steps:
 
   - name: build-stable-image
     image: woodpeckerci/plugin-docker-buildx
-    secrets: [DOCKER_HUB_USERNAME, DOCKER_HUB_PASSWORD, HF_TOKEN]
+    environment:
+      DOCKER_HUB_USERNAME:
+        from_secret: DOCKER_HUB_USERNAME
+      DOCKER_HUB_PASSWORD:
+        from_secret: DOCKER_HUB_PASSWORD
+      HF_TOKEN:
+        from_secret: HF_TOKEN
     settings:
       repo: *docker_repo
       dockerfile: ./Dockerfile
