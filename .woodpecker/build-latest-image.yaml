@@ -38,13 +38,6 @@ steps:
 
   - name: build-latest-image
     image: woodpeckerci/plugin-docker-buildx
-    environment:
-      DOCKER_HUB_USERNAME:
-        from_secret: DOCKER_HUB_USERNAME
-      DOCKER_HUB_PASSWORD:
-        from_secret: DOCKER_HUB_PASSWORD
-      HF_TOKEN:
-        from_secret: HF_TOKEN
     settings:
       repo: *docker_repo
       dockerfile: ./Dockerfile
@@ -57,14 +50,12 @@ steps:
         from_secret: DOCKER_HUB_PASSWORD
       # Only pass build_args that have corresponding ARGs in the Dockerfile
       # HF_MODEL_REPO uses Dockerfile default (single source of truth)
+      # For private models: uncomment HF_TOKEN and add the secret in Woodpecker UI
       build_args:
         - CI_COMMIT_SHA=${CI_COMMIT_SHA}
         - CI_REPO_URL=${CI_REPO_URL}
-        - CI_REPO_NAME=${CI_REPO_NAME}
-        - CI_PIPELINE_URL=${CI_PIPELINE_URL}
         - CI_PIPELINE_CREATED=${CI_PIPELINE_CREATED}
-      build_args_from_env:
-        - HF_TOKEN
+        # - HF_TOKEN=${HF_TOKEN}
     depends_on:
       - run-pre-commit-hooks
 
