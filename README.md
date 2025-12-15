@@ -104,6 +104,29 @@ huggingface-cli download SafwanLjd/egynuha-classifier --local-dir ./model
 MODEL_PATH=./model uvicorn app.main:app --reload
 ```
 
+### Setting up Pre-commit Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) for automated code quality checks. To set up the hooks:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install the git hooks
+pre-commit install --install-hooks
+
+# (Optional) Run hooks on all files
+pre-commit run --all-files
+```
+
+The hooks will now run automatically on every commit, checking for issues like:
+
+- Python linting and formatting (Ruff)
+- YAML/TOML syntax validation
+- Trailing whitespace and merge conflicts
+- Hardcoded secrets (Gitleaks)
+- Conventional commit messages (Commitizen)
+
 ## Configuration
 
 All configuration is done through environment variables. See [`.sample.env`](.sample.env) for the complete list with descriptions.
