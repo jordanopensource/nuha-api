@@ -48,17 +48,17 @@ RUN python -c "from huggingface_hub import snapshot_download; import os; snapsho
 FROM python:3.12-slim
 
 # Build-time metadata arguments (set by CI)
+# Only define ARGs that are actually used in LABELs
 ARG CI_COMMIT_SHA="unknown"
 ARG CI_REPO_URL="unknown"
-ARG CI_REPO_NAME="egy-nuha-api"
-ARG CI_PIPELINE_URL=""
 ARG CI_PIPELINE_CREATED=""
 
-# OCI Image Labels
+# OCI Image Labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="EgyNuha API" \
       org.opencontainers.image.description="Egyptian-Arabic Text Classification API" \
       org.opencontainers.image.source="${CI_REPO_URL}" \
       org.opencontainers.image.revision="${CI_COMMIT_SHA}" \
+      org.opencontainers.image.created="${CI_PIPELINE_CREATED}" \
       org.opencontainers.image.vendor="JOSA"
 
 # Security: run as non-root user
