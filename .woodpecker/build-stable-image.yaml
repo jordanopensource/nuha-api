@@ -40,6 +40,7 @@ steps:
 
   - name: build-stable-image
     image: woodpeckerci/plugin-docker-buildx
+    secrets: [DOCKER_HUB_USERNAME, DOCKER_HUB_PASSWORD, HF_TOKEN]
     settings:
       repo: *docker_repo
       registry: *registry_url
