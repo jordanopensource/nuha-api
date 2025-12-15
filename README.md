@@ -113,7 +113,7 @@ All configuration is done through environment variables. See [`.sample.env`](.sa
 | `MODEL_PATH` | `./model` | Path to the classification model |
 | `CLASSIFIER_WORKERS` | `4` | Number of inference worker threads |
 | `MAX_BATCH_SIZE` | `1000` | Maximum texts per batch request |
-| `LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) |
+| `LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | `LOG_FORMAT` | `text` | Log format (`text` or `json`) |
 | `HOST` | `0.0.0.0` | Server bind address |
 | `PORT` | `8000` | Server port |
@@ -153,8 +153,15 @@ docker build \
 │   └── build-stable-image.yaml
 ├── .dockerignore
 ├── .gitignore
+├── .gitleaks.toml         # Secret detection configuration
+├── .pre-commit-config.yaml
+├── .ruff.toml             # Linter/formatter configuration
 ├── .sample.env            # Environment variable documentation
-├── docker-compose.yml     # Local deployment configuration
+├── .samplr.yml            # Sample file generator config
+├── .yamllint              # YAML linter configuration
+├── compose.yml            # Docker Compose configuration
 ├── Dockerfile             # Multi-stage Docker build
+├── LICENSE
+├── README.md
 └── requirements.txt       # Python dependencies
 ```
