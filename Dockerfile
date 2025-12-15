@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 FROM python:3.12-slim AS model-downloader
 
 # Build arguments for model download
-ARG HF_MODEL_REPO="SafwanLjd/egynuha-classifier"
+ARG HF_MODEL_REPO="thejosango/egynuha-classifier"
 ARG HF_TOKEN=""
 
 # Make ARG available as ENV for the RUN command

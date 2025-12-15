@@ -14,9 +14,9 @@ repos:
       - args:
           - --allow-multiple-documents
         id: check-yaml
-        types: ['yaml']
+        types: ["yaml"]
       - id: check-toml
-        types: ['toml']
+        types: ["toml"]
       - id: check-merge-conflict
       - id: check-added-large-files
       - id: trailing-whitespace
@@ -37,7 +37,7 @@ repos:
       - id: yamllint
         args: [--strict, -c=.yamllint]
         # Exclude CI files: Woodpecker uses Go templates ({{ }}) that aren't valid YAML
-        exclude: '(.github|tests|.woodpecker)/.*'
+        exclude: "(.github|tests|.woodpecker)/.*"
     repo: https://github.com/adrienverge/yamllint.git
     rev: v1.37.1
   - hooks:
