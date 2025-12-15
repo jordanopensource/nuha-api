@@ -147,8 +147,8 @@ All configuration is done through environment variables. See [`.sample.env`](.sa
 
 Interactive API documentation is available at:
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+- **Swagger UI**: <http://localhost:8000/docs>
+- **ReDoc**: <http://localhost:8000/redoc>
 
 ## Building from Source
 
