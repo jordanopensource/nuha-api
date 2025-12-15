@@ -1,0 +1,79 @@
+# =============================================================================
+# Gitleaks Configuration
+# =============================================================================
+# Detects hardcoded secrets in the repository.
+# Used by pre-commit hook and CI pipeline.
+#
+# Documentation: https://github.com/gitleaks/gitleaks
+# =============================================================================
+
+# Title for the gitleaks configuration file.
+title = "JOSA Gitleaks configuration"
+
+# Extended configuration
+#
+#    default configuration as starting point:
+#    https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+#
+#    When you extend a configuration the extended rules take precedence over the
+#    default rules. I.e., if there are duplicate rules in both the extended
+#    configuration and the default configuration the extended rules or
+#    attributes of them will override the default rules.
+#    Another thing to know with extending configurations is you can chain
+#    together multiple configuration files to a depth of 2. Allowlist arrays are
+#    appended and can contain duplicates.
+
+# useDefault and path can NOT be used at the same time. Choose one.
+[extend]
+# useDefault will extend the default gitleaks config built in to the binary
+# the latest version is located at:
+# https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+useDefault = true
+
+# If there are any rules you don't want to inherit, they can be specified here.
+disabledRules = ["generic-api-key"]
+
+# Keywords are used for pre-regex check filtering. Rules that contain
+# keywords will perform a quick string compare check to make sure the
+# keyword(s) are in the content being scanned. Ideally these values should
+# either be part of the identifier or unique strings specific to the rule's regex
+# (introduced in v8.6.0)
+keywords = [
+  "auth",
+  "password",
+  "token",
+  "secret",
+  "api_key",
+  "apikey",
+]
+
+# Array of strings used for metadata and reporting purposes.
+tags = ["egynuha", "api"]
+
+
+# Global allowlists have a higher order of precedence than rule-specific allowlists.
+# If a commit listed in the `commits` field below is encountered then that commit will be skipped and no
+# secrets will be detected for said commit. The same logic applies for regexes and paths.
+[[allowlists]]
+description = "global allow list"
+paths = [
+  '''gitleaks\.toml''',
+  '''\.sample''',
+  '''(.*?)(jpg|gif|png|svg|ico|pdf|bin)$''',
+  '''__pycache__''',
+  '''\.pyc$''',
+  '''\.egg-info''',
+  '''\.?venv/''',
+  '''^model/''',
+  '''requirements.*\.txt$''',
+]
+
+# note: stopwords targets the extracted secret, not the entire regex match
+# like 'regexes' does. (stopwords introduced in 8.8.0)
+stopwords = [
+  '''REPLACE_ME''',
+  '''example''',
+  '''placeholder''',
+  '''your-token-here''',
+  '''changeme''',
+]
