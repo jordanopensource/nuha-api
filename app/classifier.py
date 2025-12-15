@@ -126,15 +126,15 @@ SUB_CLASS_LABELS = {
     },
     "en": {
         0: "Neutral",
-        1: "Objection/Rejection",
-        2: "Insults or Bullying",
-        3: "Harmful Stereotypes",
-        4: "Blame and Accusation",
-        5: "Sexual Insults",
-        6: "Verbal Sexual Harassment",
-        7: "Sexual Violence",
-        8: "Incitement/Invoking Authorities",
-        9: "Threats",
+        1: "Disagreement/Disapproval",
+        2: "Cursing or insulting language",
+        3: "Harmful stereotypes",
+        4: "Shaming or accusation",
+        5: "Sexual slurs",
+        6: "Verbal sexual harassment",
+        7: "Sexual violence",
+        8: "Incitement of violence or murder/Antagonizing authorities",
+        9: "Direct threats of violence or murder",
     },
 }
 
@@ -149,8 +149,8 @@ MAIN_CLASS_LABELS = {
     },
     "en": {
         0: "Neutral",
-        1: "Objection/Rejection",
-        2: "Discriminatory or Offensive Language",
+        1: "Disagreement/Disapproval",
+        2: "Discriminating & Humiliating Language",
         3: "Sexual Content",
         4: "Violence",
     },
@@ -159,15 +159,15 @@ MAIN_CLASS_LABELS = {
 # Mapping from sub-class ID to main-class ID
 SUB_TO_MAIN_INDEX = {
     0: 0,  # Neutral -> Neutral
-    1: 1,  # Objection/Rejection -> Objection/Rejection
-    2: 2,  # Insults or Bullying -> Discriminatory or Offensive Language
-    3: 2,  # Harmful Stereotypes -> Discriminatory or Offensive Language
-    4: 2,  # Blame and Accusation -> Discriminatory or Offensive Language
-    5: 3,  # Sexual Insults -> Sexual Content
-    6: 3,  # Verbal Sexual Harassment -> Sexual Content
-    7: 4,  # Sexual Violence -> Violence
-    8: 4,  # Incitement/Invoking Authorities -> Violence
-    9: 4,  # Threats -> Violence
+    1: 1,  # Disagreement/Disapproval -> Disagreement/Disapproval
+    2: 2,  # Cursing or insulting language -> Discriminating & Humiliating Language
+    3: 2,  # Harmful stereotypes -> Discriminating & Humiliating Language
+    4: 2,  # Shaming or accusation -> Discriminating & Humiliating Language
+    5: 3,  # Sexual slurs -> Sexual Content
+    6: 3,  # Verbal sexual harassment -> Sexual Content
+    7: 4,  # Sexual violence -> Violence
+    8: 4,  # Incitement of violence or murder/Antagonizing authorities -> Violence
+    9: 4,  # Direct threats of violence or murder -> Violence
 }
 
 # Reverse mapping: Arabic sub-class label -> sub-class ID

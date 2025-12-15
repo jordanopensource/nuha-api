@@ -56,10 +56,10 @@ curl -X POST "http://localhost:8000/classify/batch?lang=en" \
 | Main Class (EN) | Main Class (AR) | Sub-classes |
 |-----------------|-----------------|-------------|
 | Neutral | محايد | Neutral |
-| Objection/Rejection | اعتراض/رفض | Objection/Rejection |
-| Discriminatory or Offensive Language | لغة تمييزية او مهينة | Insults or Bullying, Harmful Stereotypes, Blame and Accusation |
-| Sexual Content | المحتوى الجنسي | Sexual Insults, Verbal Sexual Harassment |
-| Violence | العنف | Sexual Violence, Incitement/Invoking Authorities, Threats |
+| Disagreement/Disapproval | اعتراض/رفض | Disagreement/Disapproval |
+| Discriminating & Humiliating Language | لغة تمييزية او مهينة | Cursing or insulting language, Harmful stereotypes, Shaming or accusation |
+| Sexual Content | المحتوى الجنسي | Sexual slurs, Verbal sexual harassment |
+| Violence | العنف | Sexual violence, Incitement of violence or murder/Antagonizing authorities, Direct threats of violence or murder |
 
 ## Quick Start
 
