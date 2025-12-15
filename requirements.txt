@@ -1,4 +1,15 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-emoji==2.14.0
+# =============================================================================
+# EgyNuha API - Python Dependencies
+# =============================================================================
+
+# Web Framework
+fastapi>=0.115.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+
+# Machine Learning
+torch>=2.0.0,<3.0.0
+transformers>=4.40.0,<5.0.0
+
+# Text Processing
+emoji>=2.0.0,<3.0.0
