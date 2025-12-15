@@ -60,7 +60,8 @@ def _setup_logging() -> None:
     else:
         handler = logging.StreamHandler()
         handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
 
     logging.basicConfig(level=level, handlers=[handler])
@@ -171,7 +172,8 @@ SUB_TO_MAIN_INDEX = {
 }
 
 # Reverse mapping: Arabic sub-class label -> sub-class ID
-_AR_SUBCLASS_TO_ID: dict[str, int] = {v: k for k, v in SUB_CLASS_LABELS["ar"].items()}
+_AR_SUBCLASS_TO_ID: dict[str, int] = {
+    v: k for k, v in SUB_CLASS_LABELS["ar"].items()}
 
 
 # -----------------------------------------------------------------------------
@@ -233,7 +235,8 @@ def load_model() -> LoadedModel:
 
     # Validate required config keys
     if "id2label" not in config:
-        raise RuntimeError("Training config missing required 'id2label' mapping")
+        raise RuntimeError(
+            "Training config missing required 'id2label' mapping")
 
     # Determine device
     if torch.cuda.is_available():
@@ -375,7 +378,8 @@ def _predict_batch(
     valid_texts = [cleaned[i] for i in valid_indices]
 
     results: list[ClassificationResult] = [
-        ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
+        ClassificationResult(is_valid=False, sub_class=None,
+                             main_class=None, confidence=None)
         for _ in texts
     ]
 

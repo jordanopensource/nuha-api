@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 class ClassifyRequest(BaseModel):
     """Request body for single text classification."""
 
-    text: Annotated[str, Field(min_length=1, description="Arabic text to classify")]
+    text: Annotated[str, Field(
+        min_length=1, description="Arabic text to classify")]
 
     model_config = {
         "json_schema_extra": {
@@ -51,9 +52,12 @@ class ClassifyRequest(BaseModel):
 class ClassifyResponse(BaseModel):
     """Response for single text classification."""
 
-    is_valid: bool = Field(description="Whether the input text was valid for classification")
-    sub_class: str | None = Field(description="Classification sub_class (null if invalid)")
-    main_class: str | None = Field(description="Classification main_class (null if invalid)")
+    is_valid: bool = Field(
+        description="Whether the input text was valid for classification")
+    sub_class: str | None = Field(
+        description="Classification sub_class (null if invalid)")
+    main_class: str | None = Field(
+        description="Classification main_class (null if invalid)")
     confidence: float | None = Field(
         ge=0.0, le=1.0, description="Confidence score 0-1 (null if invalid)"
     )
