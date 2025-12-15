@@ -26,10 +26,13 @@ build/
 htmlcov/
 .tox/
 
+# Ruff
+.ruff_cache/
+
 # Environment
 .env
 .env.*
-!.env.example
+!.sample.env
 
 # Logs
 *.log
@@ -37,3 +40,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local model
+model/
