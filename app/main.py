@@ -9,16 +9,17 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, Body, Query
+from fastapi import Body, FastAPI, Query
 from pydantic import BaseModel, Field
 
 from app.classifier import (
+    Language,
     get_classification,
     get_classifications_batch,
     load_model,
     shutdown_executor,
-    Language,
 )
+
 
 # -----------------------------------------------------------------------------
 # Configuration from environment variables
@@ -158,7 +159,7 @@ async def classify_single(
     Classify a single text.
 
     Returns the predicted sub_class, main_class, and confidence score.
-    
+
     The `lang` query parameter controls the language of the returned labels:
     - `ar`: Arabic labels (default)
     - `en`: English labels
@@ -185,7 +186,7 @@ async def classify_batch(
 
     Returns classification results in the same order as the input texts.
     More efficient than multiple single requests for large volumes.
-    
+
     The `lang` query parameter controls the language of the returned labels:
     - `ar`: Arabic labels (default)
     - `en`: English labels

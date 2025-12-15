@@ -20,6 +20,7 @@ import emoji
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+
 # -----------------------------------------------------------------------------
 # Configuration from environment variables
 # -----------------------------------------------------------------------------
@@ -45,12 +46,14 @@ def _setup_logging() -> None:
 
         class JsonFormatter(logging.Formatter):
             def format(self, record):
-                return json_lib.dumps({
-                    "timestamp": self.formatTime(record),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "message": record.getMessage(),
-                })
+                return json_lib.dumps(
+                    {
+                        "timestamp": self.formatTime(record),
+                        "level": record.levelname,
+                        "logger": record.name,
+                        "message": record.getMessage(),
+                    }
+                )
 
         handler = logging.StreamHandler()
         handler.setFormatter(JsonFormatter())
@@ -98,6 +101,7 @@ Language = Literal["ar", "en"]
 
 class Lang(str, Enum):
     """Supported languages for classification labels."""
+
     AR = "ar"
     EN = "en"
 
@@ -174,6 +178,7 @@ _AR_SUBCLASS_TO_ID: dict[str, int] = {v: k for k, v in SUB_CLASS_LABELS["ar"].it
 # Data structures
 # -----------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ClassificationResult:
     """Result of a text classification."""
@@ -198,6 +203,7 @@ class LoadedModel:
 # Model loading
 # -----------------------------------------------------------------------------
 
+
 @lru_cache(maxsize=1)
 def load_model() -> LoadedModel:
     """Load model, tokenizer, and config once, cache it."""
@@ -220,7 +226,7 @@ def load_model() -> LoadedModel:
         )
 
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Invalid JSON in training config: {e}") from e
@@ -255,9 +261,10 @@ def load_model() -> LoadedModel:
 # Text preprocessing
 # -----------------------------------------------------------------------------
 
+
 def _is_arabic(char: str) -> bool:
     """Check if the character is within the Arabic Unicode block."""
-    return "\u0600" <= char <= "\u06FF"
+    return "\u0600" <= char <= "\u06ff"
 
 
 def _clean_text(text: str) -> str:
@@ -289,6 +296,7 @@ def _clean_text(text: str) -> str:
 # Label translation
 # -----------------------------------------------------------------------------
 
+
 def _get_sub_class_label(sub_class_id: int, lang: Language) -> str:
     """Get sub_class label in the specified language."""
     return SUB_CLASS_LABELS[lang][sub_class_id]
@@ -311,6 +319,7 @@ def _arabic_label_to_id(arabic_label: str) -> int:
 # -----------------------------------------------------------------------------
 # Classification functions
 # -----------------------------------------------------------------------------
+
 
 def _predict_single(text: str, loaded: LoadedModel, lang: Language) -> ClassificationResult:
     """Synchronous single prediction."""
@@ -366,9 +375,7 @@ def _predict_batch(
     valid_texts = [cleaned[i] for i in valid_indices]
 
     results: list[ClassificationResult] = [
-        ClassificationResult(
-            is_valid=False, sub_class=None, main_class=None, confidence=None
-        )
+        ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
         for _ in texts
     ]
 
@@ -412,13 +419,12 @@ def _predict_batch(
 # Async API
 # -----------------------------------------------------------------------------
 
+
 async def get_classification(text: str, lang: Language = "ar") -> ClassificationResult:
     """Async single classification."""
     loop = asyncio.get_running_loop()
     model = load_model()
-    return await loop.run_in_executor(
-        _get_executor(), _predict_single, text, model, lang
-    )
+    return await loop.run_in_executor(_get_executor(), _predict_single, text, model, lang)
 
 
 async def get_classifications_batch(
@@ -427,6 +433,4 @@ async def get_classifications_batch(
     """Async batch classification — uses true batching, not sequential."""
     loop = asyncio.get_running_loop()
     model = load_model()
-    return await loop.run_in_executor(
-        _get_executor(), _predict_batch, texts, model, lang
-    )
+    return await loop.run_in_executor(_get_executor(), _predict_batch, texts, model, lang)
