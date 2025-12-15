@@ -6,7 +6,7 @@ when:
     evaluate: 'CI_COMMIT_TARGET_BRANCH != "main"'
 
 variables:
-  - &docker_repo "josaorg/egynuha-api"
+  - &docker_repo "josaorg/nuha-api"
   - &slack_channel "builds"
   - &success_message >
     ✅ *SUCCESS* - Latest Build #{{ build.number }}

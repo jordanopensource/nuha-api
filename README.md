@@ -67,13 +67,13 @@ curl -X POST "http://localhost:8000/classify/batch?lang=en" \
 
 ```bash
 # Pull and run the latest image
-docker run -p 8000:8000 josaorg/egynuha-api:stable
+docker run -p 8000:8000 josaorg/nuha-api:stable
 
 # Or with custom configuration
 docker run -p 8000:8000 \
   -e LOG_LEVEL=DEBUG \
   -e CLASSIFIER_WORKERS=2 \
-  josaorg/egynuha-api:stable
+  josaorg/nuha-api:stable
 ```
 
 ### Using Docker Compose
@@ -131,13 +131,13 @@ Interactive API documentation is available at:
 
 ```bash
 # Build Docker image (downloads model during build)
-docker build -t egynuha-api:local .
+docker build -t nuha-api:local .
 
 # Build with custom model repository
 docker build \
   --build-arg HF_MODEL_REPO=your-org/your-model \
   --build-arg HF_TOKEN=your-token \
-  -t egynuha-api:local .
+  -t nuha-api:local .
 ```
 
 ## Project Structure

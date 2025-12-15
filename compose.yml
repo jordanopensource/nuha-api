@@ -1,9 +1,9 @@
-name: egynuha-api
+name: nuha-api
 
 services:
   api:
-    image: josaorg/egynuha-api:stable
-    container_name: egynuha-api
+    image: josaorg/nuha-api:stable
+    container_name: nuha-api
     restart: unless-stopped
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
