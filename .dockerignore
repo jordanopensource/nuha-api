@@ -30,15 +30,30 @@ ENV/
 htmlcov/
 .tox/
 
+# Ruff
+.ruff_cache/
+
 # Documentation
 *.md
 docs/
 
-# Docker
+# Docker (don't include Dockerfile in the image)
 Dockerfile*
-docker-compose*
+compose.yml
+compose.yaml
 .docker/
 
-# Misc
+# Environment and config files (not needed in container)
 .env*
 *.log
+
+# Config files (development/CI tools, not needed at runtime)
+.gitleaks.toml
+.pre-commit-config.yaml
+.ruff.toml
+.samplr.yml
+.yamllint
+LICENSE
+
+# Local model directory (model is downloaded fresh during build)
+model/
