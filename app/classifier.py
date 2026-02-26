@@ -244,7 +244,7 @@ def load_model() -> LoadedModel:
         logger.info("Using CPU for inference")
 
     # Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
     model = AutoModelForSequenceClassification.from_pretrained(model_path)
     model.to(device)
     model.eval()

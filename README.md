@@ -98,7 +98,7 @@ pip install -r requirements.txt
 
 # Download the model
 pip install huggingface_hub
-huggingface-cli download SafwanLjd/egynuha-classifier --local-dir ./model
+huggingface-cli download thejosango/egynuha-classifier --local-dir ./model
 
 # Run the API
 MODEL_PATH=./model uvicorn app.main:app --reload
