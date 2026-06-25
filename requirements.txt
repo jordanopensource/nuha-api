@@ -1,6 +1,14 @@
 # =============================================================================
-# EgyNuha API - Python Dependencies
+# Nuha API - Python Dependencies
 # =============================================================================
+
+# torch uses its CPU-only build (the +cpu local version). That wheel only exists
+# on PyTorch's CPU index, so I declare it here as an extra index. A plain
+# `pip install -r requirements.txt` then resolves torch from it and everything
+# else from PyPI, and never pulls the heavy CUDA wheel. This file is the single
+# source of truth for the torch pin (the Dockerfile just installs this file).
+# For a GPU build, drop the line below and the +cpu suffix on torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # Web Framework
 fastapi>=0.115.0,<1.0.0
@@ -8,7 +16,7 @@ pydantic>=2.0.0,<3.0.0
 uvicorn[standard]>=0.32.0,<1.0.0
 
 # Machine Learning
-torch>=2.0.0,<3.0.0
+torch==2.12.1+cpu
 transformers==5.2.0
 
 # Text Processing
