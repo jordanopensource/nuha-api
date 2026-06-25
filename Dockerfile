@@ -1,8 +1,9 @@
 # =============================================================================
-# EgyNuha API - Multi-stage Dockerfile
+# Nuha API - Multi-stage Dockerfile
 # =============================================================================
-# Builds a production-ready image with the classification model baked in.
-# Model is downloaded from HuggingFace during the build process.
+# Builds a production-ready image with all classification models baked in.
+# Models are downloaded from HuggingFace during the build process.
+# At runtime, DIALECT env var selects which model to load.
 # =============================================================================
 
 
@@ -16,9 +17,14 @@ WORKDIR /build
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt .
+# requirements.lock is the generated, fully-pinned, hashed lock (resolved from
+# requirements.txt). Installing it with --require-hashes makes the build
+# reproducible and verifies every wheel. It carries the +cpu torch pin and the
+# PyTorch CPU index, so torch resolves CPU-only and never the CUDA wheel.
+# Regenerate it whenever requirements.txt changes (see the lock file's header).
+COPY requirements.lock .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --require-hashes -r requirements.lock
 
 
 # -----------------------------------------------------------------------------
@@ -26,20 +32,24 @@ RUN pip install --no-cache-dir --upgrade pip \
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim AS model-downloader
 
-# Build arguments for model download
-ARG HF_MODEL_REPO="thejosango/egynuha-classifier"
-ARG HF_TOKEN=""
-
-# Make ARG available as ENV for the RUN command
-ENV HF_TOKEN=${HF_TOKEN}
-
 WORKDIR /model-download
 
 # Install huggingface_hub for downloading models
 RUN pip install --no-cache-dir --root-user-action=ignore huggingface_hub
 
-# Download the model from HuggingFace using Python API
-RUN python -c "from huggingface_hub import snapshot_download; import os; snapshot_download(repo_id='${HF_MODEL_REPO}', local_dir='/model', token=os.environ.get('HF_TOKEN') or None)"
+# app/dialects/<code>.json is the single source of truth for which models to
+# download and from which HuggingFace repo. Adding a dialect is a one-file
+# change — no edits here. All repos are public, so models download anonymously.
+COPY app/dialects/ /model-download/dialects/
+RUN python -c "\
+import json, glob, os; from huggingface_hub import snapshot_download; \
+files = sorted(glob.glob('/model-download/dialects/*.json')); \
+[( \
+    print('Downloading ' + cfg['hf_repo'] + ' -> /models/' + code, flush=True), \
+    snapshot_download(repo_id=cfg['hf_repo'], local_dir='/models/' + code) \
+) for code, cfg in ( \
+    (os.path.splitext(os.path.basename(f))[0], json.load(open(f))) for f in files \
+)]"
 
 
 # -----------------------------------------------------------------------------
@@ -54,8 +64,8 @@ ARG CI_REPO_URL="unknown"
 ARG CI_PIPELINE_CREATED=""
 
 # OCI Image Labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-LABEL org.opencontainers.image.title="EgyNuha API" \
-      org.opencontainers.image.description="Egyptian-Arabic Text Classification API" \
+LABEL org.opencontainers.image.title="Nuha API" \
+      org.opencontainers.image.description="Text Classification API" \
       org.opencontainers.image.source="${CI_REPO_URL}" \
       org.opencontainers.image.revision="${CI_COMMIT_SHA}" \
       org.opencontainers.image.created="${CI_PIPELINE_CREATED}" \
@@ -70,24 +80,23 @@ WORKDIR /home/appuser
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy model from downloader stage
-COPY --from=model-downloader --chown=appuser:appuser /model ./model/
+# Copy models from downloader stage
+COPY --from=model-downloader --chown=appuser:appuser /models ./models/
 
 # Copy application code
 COPY --chown=appuser:appuser app/ ./app/
 
-# Container-specific path - must match where model is copied
-# All other env vars use defaults from Python code and can be
+# DIALECT must be set at runtime (e.g. DIALECT=arz in compose.yml).
+# MODEL_PATH auto-derives from DIALECT if not set (defaults to ./models/{DIALECT}).
+# Other env vars use defaults from Python code and can be
 # overridden at runtime via: docker run --env-file .env
-# or docker-compose with env_file directive
-ENV MODEL_PATH="/home/appuser/model"
 
 USER appuser
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.getenv(\"PORT\",\"8000\")}/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
-# Use shell form with defaults for uvicorn configuration
-ENTRYPOINT ["sh", "-c", "uvicorn app.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --workers ${WORKERS:-1} --timeout-keep-alive ${TIMEOUT:-120}"]
+# exec replaces sh with uvicorn as PID 1 for proper signal handling
+ENTRYPOINT ["sh", "-c", "exec uvicorn app.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --workers ${WORKERS:-1} --timeout-keep-alive ${TIMEOUT:-120}"]
