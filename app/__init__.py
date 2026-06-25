@@ -1,1 +1,1 @@
-"""EgyNuha API - Egyptian-Arabic Text Classification Service."""
+"""Nuha API - Text Classification Service."""
