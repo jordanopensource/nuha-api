@@ -1,0 +1,75 @@
+{
+  "name": "Egyptian Arabic",
+  "hf_repo": "thejosango/nuha-arz-sub",
+  "languages": {
+    "ara": {
+      "name": "Arabic",
+      "aliases": ["ar"]
+    },
+    "eng": {
+      "name": "English",
+      "aliases": ["en"]
+    }
+  },
+  "preprocessing": {
+    "type": "nuha"
+  },
+  "mem_limit": "4g",
+  "replicas": 1,
+  "labels": {
+    "sub": {
+      "ara": {
+        "0": "محايد",
+        "1": "اعتراض/رفض",
+        "2": "السب او التنمر",
+        "3": "صور نمطية ضارة",
+        "4": "التأثيم والإتهام",
+        "5": "شتائم جنسية",
+        "6": "التحرش الجنسي اللفظي",
+        "7": "العنف الجنسي",
+        "8": "التحريض/استعداء السلطات",
+        "9": "التهديد"
+      },
+      "eng": {
+        "0": "Neutral",
+        "1": "Disagreement/Disapproval",
+        "2": "Cursing or insulting language",
+        "3": "Harmful stereotypes",
+        "4": "Shaming or accusation",
+        "5": "Sexual slurs",
+        "6": "Verbal sexual harassment",
+        "7": "Sexual violence",
+        "8": "Incitement of violence or murder/Antagonizing authorities",
+        "9": "Direct threats of violence or murder"
+      }
+    },
+    "main": {
+      "ara": {
+        "0": "محايد",
+        "1": "اعتراض/رفض",
+        "2": "لغة تمييزية او مهينة",
+        "3": "المحتوى الجنسي",
+        "4": "العنف"
+      },
+      "eng": {
+        "0": "Neutral",
+        "1": "Disagreement/Disapproval",
+        "2": "Discriminating & Humiliating Language",
+        "3": "Sexual Content",
+        "4": "Violence"
+      }
+    },
+    "sub_to_main": {
+      "0": 0,
+      "1": 1,
+      "2": 2,
+      "3": 2,
+      "4": 2,
+      "5": 3,
+      "6": 3,
+      "7": 4,
+      "8": 4,
+      "9": 4
+    }
+  }
+}

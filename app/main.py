@@ -92,7 +92,11 @@ class BatchClassifyRequest(BaseModel):
     """Request body for batch text classification."""
 
     texts: Annotated[
+        << << << < HEAD
         list[Annotated[str, Field(max_length=50000)]],
+        == == ===
+        list[Annotated[str, Field(max_length=10000)]],
+        >>>>>> > 532476d(feat: serve multiple dialects from one config-driven app)
         Field(
             min_length=1,
             max_length=MAX_BATCH_SIZE,
@@ -131,8 +135,15 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str
-    cache: CacheStats | None = Field(
-        default=None, description="Inference cache statistics")
+
+
+<< << << < HEAD
+cache: CacheStats | None = Field(
+    default=None, description="Inference cache statistics")
+== == == =
+cache: CacheStats | None = Field(
+    default=None, description="Inference cache statistics")
+>>>>>> > 532476d(feat: serve multiple dialects from one config-driven app)
 
 
 class ErrorResponse(BaseModel):
@@ -183,23 +194,39 @@ _DIALECT_PARAM_DESC = (
 
 def _lang_forms(code: str) -> str:
     """Render a language as its canonical code plus aliases, e.g. "'ara'/'ar' (Arabic)"."""
-    codes = [
-        code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
-    return "/".join(f"'{c}'" for c in codes) + f" ({LANGUAGE_NAMES[code]})"
+
+
+<< << << < HEAD
+codes = [
+    code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
+== == == =
+codes = [code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
+>>>>>> > 532476d(feat: serve multiple dialects from one config-driven app)
+return "/".join(f"'{c}'" for c in codes) + f" ({LANGUAGE_NAMES[code]})"
 
 
 _LANG_PARAM_DESC = (
     "Response language (controls label language, not which model runs). "
     "Accepts the canonical ISO 639-3 code or a two-letter alias. "
     "Supported by this dialect: "
+    << << << < HEAD
     + ", ".join(_lang_forms(code)
                 for code in LANGUAGE_NAMES if code in SUPPORTED_LANGUAGES)
+    == == ===
+    + ", ".join(_lang_forms(code)
+                for code in LANGUAGE_NAMES if code in SUPPORTED_LANGUAGES)
+    >> >>>> > 532476d(feat: serve multiple dialects from one config-driven app)
     + "."
 )
 # Every code accepted for this dialect (canonical plus aliases), for error messages.
 _ACCEPTED_LANGS = sorted(
+    << << << < HEAD
     set(SUPPORTED_LANGUAGES) | {
         a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
+    == == ===
+    set(SUPPORTED_LANGUAGES) | {
+        a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
+    >> >>>> > 532476d(feat: serve multiple dialects from one config-driven app)
 )
 
 app = FastAPI(
@@ -300,8 +327,13 @@ async def health_check() -> HealthResponse:
 async def classify_single(
     request: Annotated[ClassifyRequest, Body()],
     lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
+    << << << < HEAD
     dialect: Annotated[str | None, Query(
         description=_DIALECT_PARAM_DESC)] = None,
+    == == ===
+    dialect: Annotated[str | None, Query(
+        description=_DIALECT_PARAM_DESC)] = None,
+    >>>>>> > 532476d(feat: serve multiple dialects from one config-driven app)
 ) -> ClassifyResponse:
     """
     Classify a single text.
@@ -327,8 +359,13 @@ async def classify_single(
 async def classify_batch(
     request: Annotated[BatchClassifyRequest, Body()],
     lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
+    << << << < HEAD
     dialect: Annotated[str | None, Query(
         description=_DIALECT_PARAM_DESC)] = None,
+    == == ===
+    dialect: Annotated[str | None, Query(
+        description=_DIALECT_PARAM_DESC)] = None,
+    >>>>>> > 532476d(feat: serve multiple dialects from one config-driven app)
 ) -> BatchClassifyResponse:
     """
     Classify multiple texts in a single request.
