@@ -48,6 +48,12 @@ ignore = [
     "B008",   # do not perform function calls in argument defaults (FastAPI Depends)
     "B904",   # raise without from inside except (too strict)
     "SIM108", # use ternary operator (reduces readability sometimes)
+    # This is an Arabic-language codebase: Arabic letters in strings, docstrings
+    # and comments are real data, not Latin look-alikes. The ambiguous-unicode
+    # rules only fire false positives here.
+    "RUF001", # ambiguous character in string
+    "RUF002", # ambiguous character in docstring
+    "RUF003", # ambiguous character in comment
 ]
 
 # Allow autofix for all enabled rules
@@ -58,8 +64,10 @@ unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [lint.per-file-ignores]
-# Tests can use assert and have longer lines
-"tests/**/*.py" = ["S101", "E501"]
+# Tests can use assert and have longer lines, and some intentionally show plain
+# patterns (an `or` fallback, a natural-order assert) that the simplify rules
+# would otherwise rewrite.
+"tests/**/*.py" = ["S101", "E501", "SIM222", "SIM300"]
 # Init files can have unused imports (re-exports)
 "__init__.py" = ["F401"]
 

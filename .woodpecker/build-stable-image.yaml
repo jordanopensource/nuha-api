@@ -38,6 +38,15 @@ steps:
       args: "--all-files"
       skip: "end-of-file-fixer, run-samplr"
 
+  # Verify requirements.lock has not drifted from requirements.txt: regenerate
+  # it in this pinned Python and fail if the committed lock differs. Catches a
+  # requirements.txt change that forgot to regenerate the lock.
+  - name: check-lockfile
+    image: python:3.12-slim
+    commands:
+      - pip install --no-cache-dir pip-tools==7.5.3
+      - python scripts/check_lock.py
+
   - name: build-stable-image
     image: woodpeckerci/plugin-docker-buildx
     settings:
@@ -51,16 +60,19 @@ steps:
         from_secret: REGISTRY_USERNAME
       password:
         from_secret: REGISTRY_SECRET
-      # Only pass build_args that have corresponding ARGs in the Dockerfile
-      # HF_MODEL_REPO uses Dockerfile default (single source of truth)
-      # For private models: uncomment HF_TOKEN and add the secret in Woodpecker UI
+      # Only pass build_args that have corresponding ARGs in the Dockerfile.
+      # Model repos are read from app/dialects/<code>.json at build time (not
+      # build_args), and all repos are public, so no HF token is needed.
       build_args:
         - CI_COMMIT_SHA=${CI_COMMIT_SHA}
         - CI_REPO_URL=${CI_REPO_URL}
         - CI_PIPELINE_CREATED=${CI_PIPELINE_CREATED}
-        # - HF_TOKEN=${HF_TOKEN}
     depends_on:
       - run-pre-commit-hooks
+      # The lock check always runs (it is cheap next to the image build), so the
+      # build waits on it and a drift failure blocks the build, so a stale-lock
+      # image is never pushed.
+      - check-lockfile
 
   - name: notify-slack-stable-success
     image: plugins/slack

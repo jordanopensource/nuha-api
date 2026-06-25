@@ -44,6 +44,18 @@ repos:
       - id: run-samplr
     repo: https://github.com/jordanopensource/pre-commit-hooks
     rev: v0.4.5
+  # compose.yml and nginx/dialects.conf.template are generated from app/dialects/
+  # (Compose can't loop, nginx can't read JSON). Like run-samplr keeps .sample.env
+  # current, this regenerates both on commit so they never drift from the dialect
+  # files or from each other.
+  - hooks:
+      - id: render-config
+        name: regenerate compose.yml + nginx routing from app/dialects/
+        entry: python scripts/render_config.py
+        language: system
+        pass_filenames: false
+        files: '^(app/dialects/.*\.json|compose\.template\.yml)$'
+    repo: local
   - hooks:
       - id: gitleaks
         name: detect hardcoded secrets
