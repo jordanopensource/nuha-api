@@ -41,5 +41,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local model
+# Local models
 model/
+models/
