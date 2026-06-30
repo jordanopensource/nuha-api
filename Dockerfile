@@ -124,7 +124,11 @@ USER appuser
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+# Generous timeout: under a CPU-saturated burst the event loop that serves
+# /health is briefly starved; a tight timeout would falsely mark a busy-but-
+# healthy backend unhealthy. (compose.yml's healthcheck mirrors this and, when
+# running via Compose, overrides it.)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
 # exec replaces sh with uvicorn as PID 1 for proper signal handling
