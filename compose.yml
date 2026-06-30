@@ -4,7 +4,6 @@
 name: nuha-api
 
 x-backend: &backend
-  image: ${NUHA_IMAGE:-josaorg/nuha-api:stable}
   restart: unless-stopped
   env_file:
     - path: .env
@@ -56,6 +55,12 @@ services:
 
   nuha-api-acm:
     <<: *backend
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:acm
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - DIALECT=acm
     environment:
       - DIALECT=acm
     deploy:
@@ -69,6 +74,12 @@ services:
 
   nuha-api-arz:
     <<: *backend
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:arz
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - DIALECT=arz
     environment:
       - DIALECT=arz
     deploy:
@@ -82,6 +93,12 @@ services:
 
   nuha-api-ckb:
     <<: *backend
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:ckb
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - DIALECT=ckb
     environment:
       - DIALECT=ckb
     deploy:

@@ -42,14 +42,18 @@ Inside a backend, one request goes through these steps:
 
 ## Why it is built this way
 
-I bake all three models into one Docker image and pick which one to load at
-runtime with the `DIALECT` environment variable. That keeps the build and the CI
-pipeline simple: I build one image, not three, and there is no per-dialect
-Dockerfile to keep in sync.
+I build one image per dialect, each baking in only that dialect's model. A single
+`Dockerfile` does all three: it takes a `DIALECT` build argument, reads that
+dialect's model repo from its dialect file, and downloads just that one model.
+The dialect code becomes the image tag (`nuha-api:arz`, `nuha-api:acm`,
+`nuha-api:ckb`). At runtime the `DIALECT` environment variable selects the same
+dialect, so the container loads the model that is actually present.
 
-Each container loads exactly one model, so it uses about a third of the memory it
-would take to hold all three. It also means I can scale each dialect on its own.
-If Iraqi traffic spikes, I add Iraqi replicas without touching the others.
+Each image carries exactly one model, so it is far smaller than a single image
+holding all three would be (about 1.0 GB for a BERT dialect, 1.6 GB for the
+larger Kurdish model). It also means I can build, ship, and scale each dialect on
+its own. If Iraqi traffic spikes, I add Iraqi replicas without touching the
+others.
 
 Everything that is specific to a dialect lives in one file: `app/dialects/<code>.json`.
 That file holds the dialect's name, its HuggingFace model repo, its languages, its
@@ -93,6 +97,9 @@ This is the way to run all three dialects behind the proxy.
 # Every variable already has a sensible default, so this step is optional.
 cp .sample.env .env
 
+# Build the three per-dialect images (each bakes in only its own model).
+docker compose build
+
 # Start the three dialect backends and the nginx proxy.
 docker compose up -d
 ```
@@ -100,27 +107,36 @@ docker compose up -d
 The API is then on port 8000 (change it with `PORT` in `.env`). The proxy waits
 for all three backends to report healthy before it accepts traffic.
 
-By default the stack pulls `josaorg/nuha-api:stable`. To run an image you built
-yourself, set `NUHA_IMAGE`:
+Compose tags the images it builds `nuha-api:arz`, `nuha-api:acm`, and
+`nuha-api:ckb`. To run images from a registry instead of building locally, set
+`NUHA_IMAGE_PREFIX` to the repository path; Compose appends `:<code>` per
+dialect. For the JOSA registry, where CI publishes the per-dialect images:
 
 ```bash
-NUHA_IMAGE=nuha-api:local docker compose up -d
+NUHA_IMAGE_PREFIX=registry.cloud.josa.ngo/library/nuha-api docker compose up -d
 ```
+
+That resolves to `…/nuha-api:arz`, `…/nuha-api:acm`, and `…/nuha-api:ckb`. CI
+also pushes channel- and commit-pinned tags per dialect (`arz-latest`,
+`arz-stable`, `arz-stable-<sha>`, and so on) for rollback; pin a specific tag by
+setting the image directly in your own override file.
 
 ### One dialect in a single container
 
-If you only need one dialect, run the image directly. `DIALECT` is required and
-has no default.
+If you only need one dialect, run that dialect's image directly. `DIALECT` is
+required, and it must match the dialect the image was built for (the image bakes
+in only that one model). Each image already defaults `DIALECT` to the dialect it
+was built for, so a bare run works.
 
 ```bash
-docker run -p 8000:8000 -e DIALECT=arz josaorg/nuha-api:stable
+docker run -p 8000:8000 nuha-api:arz
 
-# With a couple of overrides:
+# An image from the registry, with a couple of overrides:
 docker run -p 8000:8000 \
   -e DIALECT=acm \
   -e LOG_LEVEL=DEBUG \
   -e CLASSIFIER_WORKERS=2 \
-  josaorg/nuha-api:stable
+  registry.cloud.josa.ngo/library/nuha-api:acm
 ```
 
 ### Locally for development
@@ -133,17 +149,18 @@ source venv/bin/activate            # Windows: venv\Scripts\activate
 # Install the runtime dependencies.
 pip install -r requirements.txt
 
-# Download the model for the dialect you want to run.
+# Download the ONNX model for the dialect you want to run.
 pip install huggingface_hub
-hf download thejosango/nuha-arz-sub --local-dir ./models/arz
+hf download thejosango/nuha-arz-sub-onnx --local-dir ./models/arz
 
 # Run it. DIALECT is required; the model must exist at ./models/{DIALECT}.
 DIALECT=arz uvicorn app.main:app --reload
 ```
 
-Repeat the download step with `thejosango/safa-acm-sub` into `./models/acm` or
-`thejosango/safa-ckb-sub` into `./models/ckb` for the other dialects. If your
-models live somewhere else, point `MODEL_PATH` at the directory.
+Repeat the download step with `thejosango/safa-acm-sub-onnx` into `./models/acm`
+or `thejosango/safa-ckb-sub-onnx` into `./models/ckb` for the other dialects. The
+repos hold the exported ONNX graph and its tokenizer, which is all the runtime
+needs. If your models live somewhere else, point `MODEL_PATH` at the directory.
 
 ### Tests
 
@@ -153,9 +170,9 @@ The tests mock the ML imports, so you do not need the models present to run them
 ```bash
 pip install -r requirements-test.txt
 
-DIALECT=arz pytest    # 238 passed, 2 skipped
-DIALECT=acm  pytest    # 238 passed, 2 skipped
-DIALECT=ckb pytest    # 236 passed, 4 skipped
+DIALECT=arz pytest    # 268 passed, a few skipped
+DIALECT=acm  pytest    # 268 passed, a few skipped
+DIALECT=ckb pytest    # 267 passed, a few skipped
 ```
 
 The `ckb` suite skips a few extra cases: they cover the Kurdish-only `lang=ckb`
@@ -284,8 +301,7 @@ Anything dialect-specific (memory limit, replica count) is in
 | `DIALECT`            | *(required)*           | Which dialect this container serves: `arz`, `acm`, or `ckb`. No default.       |
 | `MODEL_PATH`         | `./models/{DIALECT}`   | Where to load the model from. Derived from `DIALECT` if unset.                |
 | `CLASSIFIER_WORKERS` | `2`                    | Concurrent inference slots. Sizes both the thread pool and the 503 gate.      |
-| `OMP_NUM_THREADS`    | `1`                    | Torch threads per inference. Keep at 1 (see Deployment notes).                |
-| `MKL_NUM_THREADS`    | `1`                    | Same as above, for MKL.                                                       |
+| `ORT_INTRA_OP_THREADS`| `1`                   | ONNX Runtime threads per inference. Keep at 1 (see Deployment notes).         |
 | `INFERENCE_TIMEOUT`  | `120`                  | Per-request inference timeout in seconds. A safety backstop, not a tuning knob.|
 | `MAX_BATCH_SIZE`     | `1000`                 | Most texts allowed in one batch request.                                      |
 | `CACHE_SIZE`         | `1024`                 | LRU capacity of the prediction cache. 0 disables it.                          |
@@ -300,8 +316,10 @@ Anything dialect-specific (memory limit, replica count) is in
 
 A couple of proxy-only variables: `DEFAULT_DIALECT` (default `arz`) is the
 dialect the proxy uses for no-dialect requests and for the docs pages.
-`NUHA_IMAGE` selects the backend image. `BACKEND_CPU_LIMIT`, `PROXY_CPU_LIMIT`,
-`PROXY_MEM_LIMIT`, and `BACKEND_MEM_RESERVATION` set Compose resource caps.
+`NUHA_IMAGE_PREFIX` (default `nuha-api`) is the repository prefix for the
+per-dialect backend images; Compose appends `:<code>` to it. `BACKEND_CPU_LIMIT`,
+`PROXY_CPU_LIMIT`, `PROXY_MEM_LIMIT`, and `BACKEND_MEM_RESERVATION` set Compose
+resource caps.
 
 ## Deployment notes
 
@@ -329,13 +347,21 @@ hardcoded list of dialects (more on that below).
 
 Inference is CPU bound, so the tuning rule is one in-flight inference per CPU the
 container is allowed. Keep `CLASSIFIER_WORKERS` equal to the backend's CPU limit
-and keep `OMP_NUM_THREADS` and `MKL_NUM_THREADS` at 1.
+and keep `ORT_INTRA_OP_THREADS` at 1. The product of the two should stay near
+the CPU limit: that runs `CLASSIFIER_WORKERS` single-threaded inferences, one per
+core. To favour fewer but faster (multi-threaded) batches over concurrency, raise
+`ORT_INTRA_OP_THREADS` and lower `CLASSIFIER_WORKERS` to keep that product the
+same.
 
-The reason for pinning the torch threads is a real trap. By default torch grabs
-one thread per host core and ignores the Docker CPU cap. Under that cap the
-kernel throttles the container and every inference slows down. I measured a
-single inference at about 4.5x slower with the default threading than with one
-thread per inference. Setting OMP and MKL to 1 fixes it.
+The reason for pinning the per-inference threads is a real trap, and it is the
+same one the old torch build had. Left to its default, ONNX Runtime sizes its
+intra-op thread pool to the host core count and ignores the Docker CPU cap. Under
+that cap the kernel throttles the container and every inference slows down. With
+`CLASSIFIER_WORKERS` inferences in flight, each also trying to use every host
+core, they oversubscribe the CPU badly. Pinning `ORT_INTRA_OP_THREADS` to 1 keeps
+each inference on a single core, so the slots run one per core with no
+oversubscription. (This single variable replaces the two torch-only
+`OMP_NUM_THREADS` and `MKL_NUM_THREADS` knobs the PyTorch build used.)
 
 Each backend protects itself with a non-blocking gate sized to
 `CLASSIFIER_WORKERS`. When every slot is busy, the next request gets an immediate
@@ -411,8 +437,10 @@ and rebuild. No application code changes.
    the nginx routing (a new route for `?dialect=<code>`). The `render-config`
    pre-commit hook also does this for you on commit, so you usually do not run it
    by hand.
-3. Rebuild the image. The model-download stage reads the dialect files and pulls
-   your new `hf_repo` automatically.
+3. Build the image for the new dialect with `docker build --build-arg
+   DIALECT=<code> -t nuha-api:<code> .` (or `docker compose build` to build them
+   all). The model-download stage reads the dialect file and pulls your new
+   `hf_repo` automatically.
 
 The classifier globs `app/dialects/*.json` at import, so it picks up the new file
 with no edit. The only time you touch Python is if the dialect needs a brand new
@@ -427,35 +455,39 @@ and re-render.
 
 ## Build
 
-The Dockerfile is a three-stage build:
+The Dockerfile builds one image per dialect. It takes a `DIALECT` build argument
+that selects which single model to bake in, in three stages:
 
 1. **Dependencies.** Install the Python packages into a virtual environment from
    `requirements.lock`.
-2. **Model download.** Read every `app/dialects/<code>.json` and download each
-   dialect's model from its `hf_repo`. All repos are public, so this needs no
-   token.
-3. **Runtime.** A slim image with the virtual environment, the models, and the
+2. **Model download.** Read the chosen dialect's `app/dialects/<code>.json`,
+   download that one model from its `hf_repo`, and bake only it. The repos are
+   public, so this needs no token.
+3. **Runtime.** A slim image with the virtual environment, the one model, and the
    app, running as a non-root user. uvicorn runs as PID 1 for clean signal
-   handling.
+   handling. The image defaults `DIALECT` to the one it was built for.
 
 ```bash
-# Build the image (this downloads all three models during the build).
-docker build -t nuha-api:local .
+# Build one dialect's image (downloads just that dialect's model).
+docker build --build-arg DIALECT=arz -t nuha-api:arz .
 
 # Run what you built.
-docker run -p 8000:8000 -e DIALECT=arz nuha-api:local
+docker run -p 8000:8000 nuha-api:arz
 ```
 
-The result is a CPU-only image of about 3.6 GB.
+`docker compose build` does this for all three dialects at once, producing
+`nuha-api:arz`, `nuha-api:acm`, and `nuha-api:ckb`. The images are CPU-only and
+sized to their one model: about 1.0 GB for `arz`, 1.1 GB for `acm`, and 1.6 GB
+for the larger XLM-RoBERTa `ckb` model.
 
 ### Dependencies and the lockfile
 
-`requirements.txt` is the human-edited list of direct dependencies. It is also
-the single source of the torch pin: torch is pinned to `2.12.1+cpu`, and the file
-declares PyTorch's CPU wheel index inline (`--extra-index-url
-https://download.pytorch.org/whl/cpu`). Because of that, a plain `pip install -r
-requirements.txt` resolves the CPU-only torch on its own and never pulls the
-heavy CUDA wheel. For a GPU build, drop that index line and the `+cpu` suffix.
+`requirements.txt` is the human-edited list of direct dependencies. Inference
+runs on ONNX Runtime, whose `onnxruntime` wheel is a normal PyPI package, so the
+file needs no custom wheel index (unlike the old PyTorch `+cpu` build, which had
+to declare PyTorch's CPU wheel index). `transformers` is still a dependency, but
+only for its `AutoTokenizer`; the models are exported to ONNX and loaded through
+`onnxruntime`, not through transformers' model classes.
 
 `requirements.lock` is generated from `requirements.txt`. It is a fully pinned,
 fully hashed lock of the whole dependency tree. The Dockerfile installs the lock
@@ -469,8 +501,8 @@ lock file's header:
 docker run --rm \
   -v "$PWD/requirements.txt:/in/requirements.txt:ro" -v "$PWD:/out" \
   python:3.12-slim sh -c \
-  "pip install pip-tools && cd /in && pip-compile --generate-hashes \
-   --allow-unsafe --output-file=/out/requirements.lock requirements.txt"
+  "pip install pip-tools==7.5.3 && cd /in && pip-compile --generate-hashes \
+   --allow-unsafe --no-strip-extras --output-file=/out/requirements.lock requirements.txt"
 ```
 
 `transformers` is pinned to `5.2.0`. Do not bump it without re-validating against
@@ -492,10 +524,10 @@ scripts/
 nginx.conf             Static proxy config; includes the generated routing
 nginx/
   dialects.conf.template  Generated routing map (one entry per dialect)
-Dockerfile             Three-stage build, all models baked in
+Dockerfile             Three-stage per-dialect build (one model baked in)
 compose.template.yml   Hand-edited source for compose.yml
 compose.yml            Generated: three backends plus the proxy
-requirements.txt       Direct dependencies (the torch pin lives here)
+requirements.txt       Direct dependencies (onnxruntime, transformers, ...)
 requirements.lock      Generated, hashed lock installed by the Dockerfile
 requirements-test.txt  Test dependencies
 .env                   Shared runtime config (per-dialect config is in dialects/)

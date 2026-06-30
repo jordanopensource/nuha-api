@@ -1,6 +1,6 @@
 {
   "name": "Egyptian Arabic",
-  "hf_repo": "thejosango/nuha-arz-sub",
+  "hf_repo": "thejosango/nuha-arz-sub-onnx",
   "languages": {
     "ara": {
       "name": "Arabic",

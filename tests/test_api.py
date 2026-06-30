@@ -449,3 +449,90 @@ class TestHttpBehavior:
         """GET on /classify (which expects POST) returns 405."""
         resp = test_client.get("/classify")
         assert resp.status_code == 405
+
+
+# =============================================================================
+# ?lang= acceptance matrix (regression lock)
+# =============================================================================
+#
+# Locks the full, per-dialect behaviour of the `lang` query parameter so it
+# cannot silently regress: BOTH the canonical ISO 639-3 code (ara/eng, plus ckb
+# for the Kurdish dialect) AND its two-letter alias (ar/en/ku) must be accepted;
+# `lang=ckb` is accepted only on the ckb dialect (422 elsewhere); an unknown code
+# is rejected. This is the matrix verified empirically during the ONNX migration:
+# canonical keys were already accepted (no code change was needed), and these
+# tests keep it that way. Runs against both /classify and /classify/batch.
+
+# dialect -> (canonical codes accepted, aliases accepted)
+_LANG_MATRIX = {
+    "arz": (("ara", "eng"), ("ar", "en")),
+    "acm": (("ara", "eng"), ("ar", "en")),
+    "ckb": (("ara", "eng", "ckb"), ("ar", "en", "ku")),
+}
+
+_BODY_SINGLE = {"text": "مرحبا بالعالم"}
+_BODY_BATCH = {"texts": ["مرحبا بالعالم"]}
+
+
+def _current_dialect() -> str:
+    return os.environ.get("DIALECT", "arz")
+
+
+class TestLangAcceptanceMatrix:
+    """Exhaustive ?lang= matrix for the active dialect, on both endpoints."""
+
+    def _canonical(self):
+        return _LANG_MATRIX[_current_dialect()][0]
+
+    def _aliases(self):
+        return _LANG_MATRIX[_current_dialect()][1]
+
+    def test_every_canonical_key_accepted_single(self, test_client):
+        """Each canonical ISO 639-3 code for this dialect returns 200 on /classify."""
+        for code in self._canonical():
+            resp = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
+            assert resp.status_code == 200, f"canonical lang={code} should be 200"
+
+    def test_every_alias_accepted_single(self, test_client):
+        """Each two-letter alias for this dialect returns 200 on /classify."""
+        for code in self._aliases():
+            resp = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
+            assert resp.status_code == 200, f"alias lang={code} should be 200"
+
+    def test_every_canonical_key_accepted_batch(self, test_client):
+        """Each canonical code for this dialect returns 200 on /classify/batch."""
+        for code in self._canonical():
+            resp = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
+            assert resp.status_code == 200, f"canonical lang={code} should be 200 (batch)"
+
+    def test_every_alias_accepted_batch(self, test_client):
+        """Each alias for this dialect returns 200 on /classify/batch."""
+        for code in self._aliases():
+            resp = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
+            assert resp.status_code == 200, f"alias lang={code} should be 200 (batch)"
+
+    def test_lang_ckb_gated_by_dialect(self, test_client):
+        """lang=ckb is 200 on the ckb dialect and 422 on every other dialect."""
+        expected = 200 if _current_dialect() == "ckb" else 422
+        resp = test_client.post("/classify?lang=ckb", json=_BODY_SINGLE)
+        assert resp.status_code == expected
+
+    def test_readme_ckb_curl_example(self, test_client):
+        """The README example `?dialect=ckb&lang=ckb` succeeds on the ckb dialect."""
+        if _current_dialect() != "ckb":
+            pytest.skip("README example targets the ckb dialect")
+        resp = test_client.post("/classify?dialect=ckb&lang=ckb", json=_BODY_SINGLE)
+        assert resp.status_code == 200
+
+    def test_unknown_lang_rejected(self, test_client):
+        """An unknown language code returns 422 on both endpoints."""
+        assert test_client.post("/classify?lang=xx", json=_BODY_SINGLE).status_code == 422
+        assert test_client.post("/classify/batch?lang=xx", json=_BODY_BATCH).status_code == 422
+
+    def test_canonical_and_alias_agree(self, test_client):
+        """A canonical code and its alias return identical responses (same label set)."""
+        # ara/ar is supported by every dialect.
+        canonical = test_client.post("/classify?lang=ara", json=_BODY_SINGLE)
+        alias = test_client.post("/classify?lang=ar", json=_BODY_SINGLE)
+        assert canonical.status_code == alias.status_code == 200
+        assert canonical.json() == alias.json()

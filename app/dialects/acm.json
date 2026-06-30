@@ -1,6 +1,6 @@
 {
   "name": "Iraqi Arabic",
-  "hf_repo": "thejosango/safa-acm-sub",
+  "hf_repo": "thejosango/safa-acm-sub-onnx",
   "languages": {
     "ara": {
       "name": "Arabic",

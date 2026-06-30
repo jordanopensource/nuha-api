@@ -1,6 +1,6 @@
 {
   "name": "Sorani Kurdish",
-  "hf_repo": "thejosango/safa-ckb-sub",
+  "hf_repo": "thejosango/safa-ckb-sub-onnx",
   "languages": {
     "ara": {
       "name": "Arabic",

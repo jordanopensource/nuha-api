@@ -78,9 +78,23 @@ def render_compose(dialects: dict[str, dict]) -> str:
         # the baseline, edit "replicas" in the dialect file and re-render; for an
         # ad-hoc burst, `docker compose up --scale nuha-api-<code>=N`. cpu and the
         # memory reservation are uniform across dialects, so they stay shared env.
+        # Each backend builds AND runs its own per-dialect image (only that
+        # dialect's model is baked in). The image tag is ${NUHA_IMAGE_PREFIX}:<code>
+        # (default prefix nuha-api), so `docker compose build` yields nuha-api:arz,
+        # nuha-api:acm, ... and `docker compose up` runs them. The build passes
+        # --build-arg DIALECT=<code>, which the Dockerfile uses to download only
+        # that model; the runtime DIALECT env (below) must match the baked model.
+        # image/build/DIALECT are per-dialect, so they are rendered here rather
+        # than shared via the x-backend anchor.
         backends.append(
             f"  nuha-api-{code}:\n"
             f"    <<: *backend\n"
+            f"    image: ${{NUHA_IMAGE_PREFIX:-nuha-api}}:{code}\n"
+            f"    build:\n"
+            f"      context: .\n"
+            f"      dockerfile: Dockerfile\n"
+            f"      args:\n"
+            f"        - DIALECT={code}\n"
             f"    environment:\n"
             f"      - DIALECT={code}\n"
             f"    deploy:\n"

@@ -19,8 +19,9 @@ from functools import lru_cache
 from pathlib import Path
 
 import emoji
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import numpy as np
+import onnxruntime as ort
+from transformers import AutoTokenizer
 
 
 # -----------------------------------------------------------------------------
@@ -100,6 +101,15 @@ CACHE_SIZE = _parse_bounded_int("CACHE_SIZE", 1024, 0, 100000)
 # inference is genuinely stuck. A full MAX_BATCH_SIZE batch is one inference, so
 # size this above how long that takes on your hardware. Default 120s.
 INFERENCE_TIMEOUT = _parse_bounded_int("INFERENCE_TIMEOUT", 120, 1, 3600)
+
+# ONNX Runtime threads PER inference. Default 1 so each of the CLASSIFIER_WORKERS
+# concurrent session.run() calls uses ~1 core, keeping the "one inference per CPU,
+# CLASSIFIER_WORKERS ~= BACKEND_CPU_LIMIT" tuning model. This replaces torch's
+# OMP/MKL thread vars and avoids the CFS-throttle trap they had (ORT would
+# otherwise default intra_op threads to the HOST core count, ignoring the Docker
+# cpu cap). To favour fewer, faster (multi-threaded) inferences over concurrency,
+# raise this and lower CLASSIFIER_WORKERS to keep their product near the cpu cap.
+ORT_INTRA_OP_THREADS = _parse_bounded_int("ORT_INTRA_OP_THREADS", 1, 1, 32)
 
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 _raw_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -353,11 +363,16 @@ class ClassificationResult:
 
 @dataclass
 class LoadedModel:
-    """Container for loaded model components."""
+    """Container for loaded model components.
 
-    model: AutoModelForSequenceClassification
+    Holds a single shared ONNX Runtime ``InferenceSession``. ORT sessions are
+    thread-safe for concurrent ``run()`` calls, so one session backs all
+    CLASSIFIER_WORKERS pool threads (the GIL is released during ``run()``).
+    """
+
+    session: ort.InferenceSession
     tokenizer: AutoTokenizer
-    device: torch.device
+    input_names: frozenset[str]  # input names the ONNX graph actually expects
     max_length: int
 
 
@@ -510,9 +525,39 @@ ACTIVE_CONFIG = DialectConfig(
 # -----------------------------------------------------------------------------
 
 
+def _find_onnx_file(path: Path) -> Path:
+    """Locate the ONNX graph inside a model directory.
+
+    Prefers the conventional ``model.onnx`` produced by Optimum/transformers
+    export; otherwise falls back to the single ``*.onnx`` file present. Raises if
+    none or more than one ambiguous candidate is found.
+    """
+    preferred = path / "model.onnx"
+    if preferred.is_file():
+        return preferred
+    candidates = sorted(path.glob("*.onnx"))
+    if not candidates:
+        raise RuntimeError(
+            f"No ONNX model (.onnx) found in {path}. "
+            f"Ensure the dialect's ONNX model is present (downloaded at build time)."
+        )
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"Multiple .onnx files in {path}: {[c.name for c in candidates]}. "
+            f"Expected a single 'model.onnx'."
+        )
+    return candidates[0]
+
+
 @lru_cache(maxsize=1)
 def load_model() -> LoadedModel:
-    """Load the model for the active dialect, cached."""
+    """Load the ONNX Runtime session + tokenizer for the active dialect, cached.
+
+    A single ``InferenceSession`` is shared across all inference threads (ORT's
+    ``run()`` is thread-safe). Intra-/inter-op threads are pinned to
+    ORT_INTRA_OP_THREADS (default 1) so each concurrent inference uses ~1 core,
+    matching the CLASSIFIER_WORKERS-per-CPU tuning model.
+    """
     path = Path(ACTIVE_CONFIG.model_path)
     if not path.exists():
         raise RuntimeError(
@@ -530,23 +575,87 @@ def load_model() -> LoadedModel:
         except json.JSONDecodeError:
             logger.warning("Could not parse %s; using max_length=128", config_path)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available():
-        logger.info("Using GPU: %s", torch.cuda.get_device_name(0))
-    else:
-        logger.info("Using CPU for inference")
-
     try:
         tokenizer = AutoTokenizer.from_pretrained(ACTIVE_CONFIG.model_path)
     except Exception:
         tokenizer = AutoTokenizer.from_pretrained(ACTIVE_CONFIG.model_path, use_fast=False)
 
-    model = AutoModelForSequenceClassification.from_pretrained(ACTIVE_CONFIG.model_path)
-    model.to(device)
-    model.eval()
+    onnx_path = _find_onnx_file(path)
 
-    logger.info("Model loaded | max_length=%s | device=%s", max_length, device)
-    return LoadedModel(model=model, tokenizer=tokenizer, device=device, max_length=max_length)
+    # Pin ORT threading so each concurrent session.run() stays ~single-core. ORT
+    # otherwise sizes intra_op threads to the host core count, ignoring the Docker
+    # cpu cap and re-introducing the CFS-throttle slowdown the torch build had.
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = ORT_INTRA_OP_THREADS
+    sess_options.inter_op_num_threads = 1
+    # Apply every graph optimization (constant folding, node fusions, CPU layout
+    # opts). This is ORT's own default, but pinning it makes the intent explicit
+    # and keeps it stable if a future ORT release changes that default.
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    session = ort.InferenceSession(
+        str(onnx_path),
+        sess_options=sess_options,
+        providers=["CPUExecutionProvider"],
+    )
+    input_names = frozenset(i.name for i in session.get_inputs())
+
+    logger.info(
+        "Model loaded | max_length=%s | provider=CPUExecutionProvider | inputs=%s "
+        "| intra_op_threads=%s",
+        max_length,
+        sorted(input_names),
+        ORT_INTRA_OP_THREADS,
+    )
+    return LoadedModel(
+        session=session,
+        tokenizer=tokenizer,
+        input_names=input_names,
+        max_length=max_length,
+    )
+
+
+def _softmax_argmax(logits: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Numerically-stable row-wise softmax, returning (max_prob, argmax) per row.
+
+    ``logits`` is the ORT classifier output of shape (batch, num_labels). Returns
+    the top probability and its class id for each row, as numpy arrays.
+    """
+    shifted = logits - np.max(logits, axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    probs = exp / np.sum(exp, axis=-1, keepdims=True)
+    predicted_ids = np.argmax(probs, axis=-1)
+    confidences = np.max(probs, axis=-1)
+    return confidences, predicted_ids
+
+
+def _build_onnx_inputs(loaded: LoadedModel, tokenized: dict) -> dict[str, np.ndarray]:
+    """Build the feed the ONNX graph expects from tokenizer output, as int64 arrays.
+
+    We feed exactly the names the session declares: a BERT graph wants
+    ``token_type_ids``, an XLM-R graph does not, and feeding a name the graph
+    doesn't declare would break ``run()``.
+
+    BERT graphs *require* ``token_type_ids``, but not every tokenizer emits it:
+    transformers 5.x's fast ``TokenizersBackend`` omits it by default (the slow
+    ``BertTokenizer`` still includes it). We pass ``return_token_type_ids=True``
+    at tokenization to coax it out, and as a backstop synthesize it here as
+    all-zeros (the correct single-sequence segment id) shaped like ``input_ids``
+    if the graph needs it but the tokenizer still didn't produce it. Without this
+    a BERT dialect on a token_type_ids-less tokenizer 500s on every request.
+    """
+    feed: dict[str, np.ndarray] = {}
+    for name in ("input_ids", "attention_mask"):
+        if name in loaded.input_names and name in tokenized:
+            feed[name] = np.asarray(tokenized[name], dtype=np.int64)
+    if "token_type_ids" in loaded.input_names:
+        if "token_type_ids" in tokenized:
+            feed["token_type_ids"] = np.asarray(tokenized["token_type_ids"], dtype=np.int64)
+        elif "input_ids" in feed:
+            # Single-sequence inputs are all segment 0; the tokenizer just didn't
+            # emit the column. Fill it so the required graph input is present.
+            feed["token_type_ids"] = np.zeros_like(feed["input_ids"])
+    return feed
 
 
 # -----------------------------------------------------------------------------
@@ -570,22 +679,22 @@ def _predict_single(
     if cached is not None:
         predicted_id, confidence_val = cached
     else:
-        inputs = loaded.tokenizer(
+        tokenized = loaded.tokenizer(
             cleaned,
             truncation=True,
             max_length=loaded.max_length,
             padding="max_length",
-            return_tensors="pt",
+            return_tensors="np",
+            # BERT graphs require token_type_ids; ask for it explicitly so the
+            # transformers 5.x fast tokenizer (which omits it by default) emits it.
+            return_token_type_ids="token_type_ids" in loaded.input_names,
         )
-        inputs = {k: v.to(loaded.device) for k, v in inputs.items()}
+        feed = _build_onnx_inputs(loaded, tokenized)
+        logits = loaded.session.run(None, feed)[0]
+        confidences, predicted_ids = _softmax_argmax(logits)
 
-        with torch.no_grad():
-            outputs = loaded.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1)
-            confidence, pred = torch.max(probs, dim=-1)
-
-        predicted_id = pred.item()
-        confidence_val = confidence.item()
+        predicted_id = int(predicted_ids[0])
+        confidence_val = float(confidences[0])
         _inference_cache.put(cleaned, (predicted_id, confidence_val))
 
     # Label lookup (always runs; it depends on lang, which is not cached).
@@ -646,24 +755,24 @@ def _predict_batch(
 
     # Run inference only on cache misses
     if miss_texts:
-        inputs = loaded.tokenizer(
+        tokenized = loaded.tokenizer(
             miss_texts,
             truncation=True,
             max_length=loaded.max_length,
             padding=True,
-            return_tensors="pt",
+            return_tensors="np",
+            # BERT graphs require token_type_ids; ask for it explicitly so the
+            # transformers 5.x fast tokenizer (which omits it by default) emits it.
+            return_token_type_ids="token_type_ids" in loaded.input_names,
         )
-        inputs = {k: v.to(loaded.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = loaded.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1)
-            confidences, predicted_ids = torch.max(probs, dim=-1)
+        feed = _build_onnx_inputs(loaded, tokenized)
+        logits = loaded.session.run(None, feed)[0]
+        confidences, predicted_ids = _softmax_argmax(logits)
 
         for j, vi in enumerate(miss_indices):
             idx = valid_indices[vi]
-            pred_id = predicted_ids[j].item()
-            conf = confidences[j].item()
+            pred_id = int(predicted_ids[j])
+            conf = float(confidences[j])
             predictions[idx] = (pred_id, conf)
             _inference_cache.put(cleaned[idx], (pred_id, conf))
 
@@ -702,10 +811,10 @@ async def _run_gated(fn: Callable, *args):
     Two things make the slot accounting correct under timeout:
 
     1. The slot is released by a done-callback when the worker thread *actually*
-       finishes, not when we stop awaiting it. A torch op can't be cancelled
-       mid-flight, so on timeout the thread keeps running to completion; releasing
-       only then keeps the gate's in-flight count honest (a slow inference can't
-       make it under-count and over-admit work).
+       finishes, not when we stop awaiting it. A native ONNX Runtime ``run()``
+       can't be cancelled mid-flight, so on timeout the thread keeps running to
+       completion; releasing only then keeps the gate's in-flight count honest (a
+       slow inference can't make it under-count and over-admit work).
     2. We ``shield`` the future so ``wait_for`` cancels only our wait, never the
        running inference, and the callback retrieves any exception so asyncio
        doesn't warn about it going unobserved on the timeout path.
