@@ -37,7 +37,7 @@ NGINX_OUTPUT = ROOT / "nginx" / "dialects.conf.template"
 DEPENDS_MARKER = "# __PROXY_DEPENDS_ON__  (generated)"
 BACKENDS_MARKER = "# __BACKENDS__  (generated: one service per dialect)"
 
-DEFAULT_MEM_LIMIT = "2g"
+DEFAULT_MEM_LIMIT = "4g"
 DEFAULT_REPLICAS = 1
 
 GENERATED_HEADER = (

@@ -15,7 +15,7 @@ x-backend: &backend
       - -c
       - >
         import urllib.request;
-        urllib.request.urlopen("http://localhost:8000/health")
+        urllib.request.urlopen("http://localhost:8000/health", timeout=5)
     # timeout is generous: under a CPU-saturated burst the event loop that serves
     # /health is briefly starved, and a tight timeout would mark a busy-but-healthy
     # backend unhealthy and trigger a needless recycle. 10s x 3 retries means a
