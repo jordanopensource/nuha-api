@@ -37,24 +37,26 @@ repos:
       - id: yamllint
         args: [--strict, -c=.yamllint]
         # Exclude CI files: Woodpecker uses Go templates ({{ }}) that aren't valid YAML
-        exclude: "(.github|tests|.woodpecker)/.*"
+        # (woodpecker-templates/ holds the same content as the generated .woodpecker/).
+        exclude: "(.github|tests|.woodpecker|woodpecker-templates)/.*"
     repo: https://github.com/adrienverge/yamllint.git
     rev: v1.37.1
   - hooks:
       - id: run-samplr
     repo: https://github.com/jordanopensource/pre-commit-hooks
     rev: v0.4.5
-  # compose.yml and nginx/dialects.conf.template are generated from app/dialects/
-  # (Compose can't loop, nginx can't read JSON). Like run-samplr keeps .sample.env
-  # current, this regenerates both on commit so they never drift from the dialect
-  # files or from each other.
+  # compose.yml, nginx/dialects.conf.template, and the two .woodpecker pipelines
+  # are generated from app/dialects/ plus their templates (Compose can't loop,
+  # nginx can't read JSON, and the CI build steps must list every dialect). Like
+  # run-samplr keeps .sample.env current, this regenerates them on commit so they
+  # never drift from the dialect files, the templates, or each other.
   - hooks:
       - id: render-config
-        name: regenerate compose.yml + nginx routing from app/dialects/
+        name: regenerate compose, nginx routing, and .woodpecker from app/dialects/
         entry: python scripts/render_config.py
         language: system
         pass_filenames: false
-        files: '^(app/dialects/.*\.json|compose\.template\.yml)$'
+        files: '^(app/dialects/.*\.json|compose\.template\.yml|woodpecker-templates/.*\.yaml)$'
     repo: local
   - hooks:
       - id: gitleaks
