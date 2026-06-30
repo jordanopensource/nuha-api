@@ -65,9 +65,9 @@ one-file change, which I cover below.
 
 | Code  | Dialect         | Model       | HuggingFace repo          | Response languages |
 |-------|-----------------|-------------|---------------------------|--------------------|
-| `arz` | Egyptian Arabic | BERT        | `thejosango/nuha-arz-sub` | `ar`, `en`         |
-| `acm` | Iraqi Arabic    | BERT        | `thejosango/safa-acm-sub` | `ar`, `en`         |
-| `ckb` | Sorani Kurdish  | XLM-RoBERTa | `thejosango/safa-ckb-sub` | `ar`, `en`, `ckb`  |
+| `arz` | Egyptian Arabic | BERT        | `thejosango/nuha-arz-sub-onnx` | `ar`, `en`         |
+| `acm` | Iraqi Arabic    | BERT        | `thejosango/safa-acm-sub-onnx` | `ar`, `en`         |
+| `ckb` | Sorani Kurdish  | XLM-RoBERTa | `thejosango/safa-ckb-sub-onnx` | `ar`, `en`, `ckb`  |
 
 The dialect codes are [ISO 639-3](https://iso639-3.sil.org/) language codes:
 `arz` (Egyptian Arabic), `acm` (Mesopotamian/Iraqi Arabic), and `ckb` (Central
@@ -170,9 +170,9 @@ The tests mock the ML imports, so you do not need the models present to run them
 ```bash
 pip install -r requirements-test.txt
 
-DIALECT=arz pytest    # 268 passed, a few skipped
-DIALECT=acm  pytest    # 268 passed, a few skipped
-DIALECT=ckb pytest    # 267 passed, a few skipped
+DIALECT=arz pytest    # 274 passed, a few skipped
+DIALECT=acm  pytest    # 274 passed, a few skipped
+DIALECT=ckb pytest    # 273 passed, a few skipped
 ```
 
 The `ckb` suite skips a few extra cases: they cover the Kurdish-only `lang=ckb`
@@ -302,7 +302,7 @@ Anything dialect-specific (memory limit, replica count) is in
 | `MODEL_PATH`         | `./models/{DIALECT}`   | Where to load the model from. Derived from `DIALECT` if unset.                |
 | `CLASSIFIER_WORKERS` | `2`                    | How many inferences run at once. Sizes the thread pool and the gate's slots.  |
 | `INFERENCE_QUEUE_SIZE` | `32`                 | Requests that may wait for a slot before shedding 503. 0 = shed immediately.  |
-| `INFERENCE_QUEUE_TIMEOUT` | `10`              | Seconds a queued request waits for a slot before a 503.                       |
+| `INFERENCE_QUEUE_TIMEOUT` | `30`              | Seconds a queued request waits for a slot before a 503.                       |
 | `ORT_INTRA_OP_THREADS`| `1`                   | ONNX Runtime threads per inference. Keep at 1 (see Deployment notes).         |
 | `INFERENCE_TIMEOUT`  | `120`                  | Per-request inference timeout in seconds. A safety backstop, not a tuning knob.|
 | `MAX_BATCH_SIZE`     | `1000`                 | Most texts allowed in one batch request.                                      |
@@ -337,10 +337,11 @@ nginx terminates client connections and routes by dialect. It also:
   the dialect.
 - Accepts request bodies up to 25 MiB, which covers a maximal batch of Arabic or
   Kurdish text.
-- Keeps client-facing timeouts tight, but allows a long read timeout (125s) on
+- Keeps client-facing timeouts tight, but allows a long read timeout (155s) on
   the classify routes so a slow batch is not cut off. That timeout sits just
-  above `INFERENCE_TIMEOUT` so the app returns its own clean 504 first and nginx
-  is only a fallback.
+  above the app's full latency budget (`INFERENCE_QUEUE_TIMEOUT + INFERENCE_TIMEOUT`,
+  30 + 120 = 150s) so the app returns its own clean 503/504 first and nginx is
+  only a fallback.
 
 The routing config is generated from the dialect files, so the proxy never has a
 hardcoded list of dialects (more on that below).
@@ -374,7 +375,7 @@ waits up to `INFERENCE_QUEUE_TIMEOUT` seconds for one to free instead of being
 shed immediately, so a short burst is served (200) rather than rejected the
 instant both workers are busy. Once `CLASSIFIER_WORKERS + INFERENCE_QUEUE_SIZE`
 requests are in flight, or a queued request waits past the timeout, the backend
-sheds a fast 503 — so latency and memory stay bounded under genuine sustained
+sheds a fast 503, so latency and memory stay bounded under genuine sustained
 overload. The queue smooths bursts within capacity; it does not add throughput,
 so scale with replicas (and keep inference fast) to raise the ceiling. Set
 `INFERENCE_QUEUE_SIZE=0` for the original no-queue, shed-immediately behavior.
