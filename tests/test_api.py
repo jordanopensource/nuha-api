@@ -93,14 +93,14 @@ class TestClassifySingle:
         assert resp.status_code == 422
 
     def test_text_exceeding_max_length_returns_422(self, test_client):
-        """Text exceeding 10000 chars returns 422."""
-        long_text = "ا" * 10001
+        """Text exceeding 50000 chars returns 422."""
+        long_text = "ا" * 50001
         resp = test_client.post("/classify", json={"text": long_text})
         assert resp.status_code == 422
 
     def test_text_at_max_length_accepted(self, test_client):
-        """Text exactly at 10000 chars is accepted."""
-        text = "ا" * 10000
+        """Text exactly at 50000 chars is accepted."""
+        text = "ا" * 50000
         resp = test_client.post("/classify", json={"text": text})
         # Should not be a validation error; may return is_valid=false
         # due to preprocessing, but the HTTP request is accepted
@@ -242,7 +242,7 @@ class TestClassifyBatch:
 
     def test_individual_text_exceeding_max_length_returns_422(self, test_client):
         """Individual text exceeding max_length in batch returns 422."""
-        texts = ["مرحبا", "ا" * 10001]
+        texts = ["مرحبا", "ا" * 50001]
         resp = test_client.post("/classify/batch", json={"texts": texts})
         assert resp.status_code == 422
 
