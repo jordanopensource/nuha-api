@@ -2,13 +2,11 @@
 # Nuha API - Python Dependencies
 # =============================================================================
 
-# torch uses its CPU-only build (the +cpu local version). That wheel only exists
-# on PyTorch's CPU index, so I declare it here as an extra index. A plain
-# `pip install -r requirements.txt` then resolves torch from it and everything
-# else from PyPI, and never pulls the heavy CUDA wheel. This file is the single
-# source of truth for the torch pin (the Dockerfile just installs this file).
-# For a GPU build, drop the line below and the +cpu suffix on torch.
---extra-index-url https://download.pytorch.org/whl/cpu
+# Inference runs on ONNX Runtime (CPU). onnxruntime is a normal PyPI package —
+# no custom wheel index needed, unlike the old torch +cpu build. transformers is
+# kept ONLY for AutoTokenizer (the models are exported to ONNX and loaded via
+# onnxruntime, not transformers' model classes). This file is the human-edited
+# source of direct deps; requirements.lock is the generated, hashed lock.
 
 # Web Framework
 fastapi>=0.115.0,<1.0.0
@@ -16,7 +14,7 @@ pydantic>=2.0.0,<3.0.0
 uvicorn[standard]>=0.32.0,<1.0.0
 
 # Machine Learning
-torch==2.12.1+cpu
+onnxruntime>=1.18.0,<2.0.0
 transformers==5.2.0
 
 # Text Processing

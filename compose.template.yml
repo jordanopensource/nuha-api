@@ -3,10 +3,16 @@
 # The generated compose.yml has one backend service per app/dialects/<code>.json
 # (each with its own mem_limit from that file) plus the proxy's depends_on, so
 # adding a dialect needs no compose edits here.
+#
+# Each backend builds (and runs) its OWN per-dialect image carrying only that
+# dialect's model: image ${NUHA_IMAGE_PREFIX:-nuha-api}:<code>, built with
+# --build-arg DIALECT=<code> (see the generated per-service build sections).
+# `docker compose build` produces all per-dialect images; `docker compose up`
+# runs them. The image/build/DIALECT lines are per-dialect, so they are rendered
+# per service — only the truly shared bits live in this anchor.
 name: nuha-api
 
 x-backend: &backend
-  image: ${NUHA_IMAGE:-josaorg/nuha-api:stable}
   restart: unless-stopped
   env_file:
     - path: .env

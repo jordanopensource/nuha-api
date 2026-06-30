@@ -47,23 +47,29 @@ steps:
       - pip install --no-cache-dir pip-tools==7.5.3
       - python scripts/check_lock.py
 
-  - name: build-stable-image
+  # One image PER DIALECT: each bakes only its own model (selected by the
+  # DIALECT build_arg, which the Dockerfile reads to download that dialect's
+  # hf_repo from app/dialects/<code>.json). The dialect code is the image tag
+  # (nuha-api:arz, ...), matching how compose tags them via
+  # ${NUHA_IMAGE_PREFIX}:<code>. Each dialect also gets channel + SHA-pinned
+  # tags (<code>-stable, <code>-stable-${CI_COMMIT_SHA}) for rollback. The
+  # buildx-plugin CI_* metadata args are preserved and the model repos are still
+  # read from app/dialects/ at build time (public repos, no HF token).
+  - name: build-stable-image-arz
     image: woodpeckerci/plugin-docker-buildx
     settings:
       repo: *docker_repo
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - stable-${CI_COMMIT_SHA}
-        - stable
+        - arz-stable
+        - arz-stable-${CI_COMMIT_SHA}
       username:
         from_secret: REGISTRY_USERNAME
       password:
         from_secret: REGISTRY_SECRET
-      # Only pass build_args that have corresponding ARGs in the Dockerfile.
-      # Model repos are read from app/dialects/<code>.json at build time (not
-      # build_args), and all repos are public, so no HF token is needed.
       build_args:
+        - DIALECT=arz
         - CI_COMMIT_SHA=${CI_COMMIT_SHA}
         - CI_REPO_URL=${CI_REPO_URL}
         - CI_PIPELINE_CREATED=${CI_PIPELINE_CREATED}
@@ -72,6 +78,50 @@ steps:
       # The lock check always runs (it is cheap next to the image build), so the
       # build waits on it and a drift failure blocks the build, so a stale-lock
       # image is never pushed.
+      - check-lockfile
+
+  - name: build-stable-image-acm
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: *docker_repo
+      registry: *registry_url
+      dockerfile: ./Dockerfile
+      tags:
+        - acm-stable
+        - acm-stable-${CI_COMMIT_SHA}
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_SECRET
+      build_args:
+        - DIALECT=acm
+        - CI_COMMIT_SHA=${CI_COMMIT_SHA}
+        - CI_REPO_URL=${CI_REPO_URL}
+        - CI_PIPELINE_CREATED=${CI_PIPELINE_CREATED}
+    depends_on:
+      - run-pre-commit-hooks
+      - check-lockfile
+
+  - name: build-stable-image-ckb
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: *docker_repo
+      registry: *registry_url
+      dockerfile: ./Dockerfile
+      tags:
+        - ckb-stable
+        - ckb-stable-${CI_COMMIT_SHA}
+      username:
+        from_secret: REGISTRY_USERNAME
+      password:
+        from_secret: REGISTRY_SECRET
+      build_args:
+        - DIALECT=ckb
+        - CI_COMMIT_SHA=${CI_COMMIT_SHA}
+        - CI_REPO_URL=${CI_REPO_URL}
+        - CI_PIPELINE_CREATED=${CI_PIPELINE_CREATED}
+    depends_on:
+      - run-pre-commit-hooks
       - check-lockfile
 
   - name: notify-slack-stable-success
@@ -85,7 +135,9 @@ steps:
       - status: success
     depends_on:
       - run-pre-commit-hooks
-      - build-stable-image
+      - build-stable-image-arz
+      - build-stable-image-acm
+      - build-stable-image-ckb
 
   - name: notify-slack-stable-failure
     image: plugins/slack
@@ -98,4 +150,6 @@ steps:
       - status: failure
     depends_on:
       - run-pre-commit-hooks
-      - build-stable-image
+      - build-stable-image-arz
+      - build-stable-image-acm
+      - build-stable-image-ckb

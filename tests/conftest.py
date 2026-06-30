@@ -1,10 +1,14 @@
 """Shared fixtures for the Nuha API test suite.
 
-The transformers library may fail deep imports (AutoModelForSequenceClassification,
-AutoTokenizer) due to missing native libraries (e.g., libprotobuf). We patch the
-specific sub-modules that break BEFORE any app code is imported.
+app/classifier.py imports onnxruntime (for inference) and AutoTokenizer from
+transformers. The test suite runs without the real onnxruntime wheel or any
+model files, so we inject mocks for the ML stack BEFORE any app code is imported
+(onnxruntime is always mocked; transformers' deep import chain can fail on some
+hosts due to missing native libs like libprotobuf, so we mock the breaking
+sub-modules and the tokenizer/model classes too).
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -32,18 +36,24 @@ def _dialect_file(code: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Patch broken transformers sub-module imports
+# Mock the ML stack before app code is imported
 # ---------------------------------------------------------------------------
-# The top-level `transformers` package uses lazy imports (__getattr__).
-# When app/classifier.py does `from transformers import AutoModelForSequenceClassification`,
-# it triggers a deep import chain:
-#   transformers.models.auto.modeling_auto
-#   -> transformers.models.auto.auto_factory
-#   -> transformers.generation (GenerationMixin)
-#   -> sklearn -> pyarrow -> libprotobuf.so  <-- FAILS
+# app/classifier.py imports `onnxruntime` (inference) and, from transformers,
+# `AutoTokenizer`. Tests must run without the real onnxruntime wheel or any model
+# files, so we inject a MagicMock for `onnxruntime` here, before classifier is
+# imported. (numpy is a real, lightweight dependency and is used as-is.)
 #
-# We pre-inject mock modules for the entire chain so the real import never
-# reaches pyarrow. We also mock `torch` operations if needed.
+# transformers' top-level package uses lazy imports (__getattr__). When
+# classifier.py does `from transformers import AutoTokenizer`, it can trigger a
+# deep import chain (modeling_auto -> auto_factory -> generation -> sklearn ->
+# pyarrow -> libprotobuf.so) that fails on some hosts. We pre-inject mock modules
+# for that chain so the real import never reaches pyarrow, and make AutoTokenizer
+# resolve to a MagicMock. If transformers is not installed at all, we mock the
+# top-level package too so the suite still runs (it never does real inference).
+
+# onnxruntime is always mocked: no native runtime needed for contract/logic tests.
+_saved_onnxruntime = sys.modules.get("onnxruntime")
+sys.modules["onnxruntime"] = MagicMock()
 
 _MODULES_TO_MOCK = [
     "transformers.models.auto.modeling_auto",
@@ -60,18 +70,21 @@ for _mod_name in _MODULES_TO_MOCK:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
 
-# Now make the lazy transformers module resolve the two classes we need
-# to mock stubs so `from transformers import X` works
-import transformers as _tf  # noqa: E402
+# Make `from transformers import AutoTokenizer` work. Prefer the real lazy
+# package (so its __getattr__ can be patched); if it isn't installed, fall back
+# to a fully mocked top-level module.
+try:
+    import transformers as _tf
+except Exception:  # transformers not installed on this host
+    _tf = MagicMock()
+    sys.modules["transformers"] = _tf
 
-
-if not hasattr(_tf, "_test_patched"):
+if not getattr(_tf, "_test_patched", False):
     _orig_getattr = getattr(type(_tf), "__getattr__", None)
 
     def _safe_getattr(self, name):
-        """Return a MagicMock for model/tokenizer classes instead of triggering deep imports."""
+        """Return a MagicMock for tokenizer/model classes instead of triggering deep imports."""
         if name in (
-            "AutoModelForSequenceClassification",
             "AutoTokenizer",
             "PreTrainedModel",
             "PreTrainedTokenizer",
@@ -82,7 +95,10 @@ if not hasattr(_tf, "_test_patched"):
             return _orig_getattr(self, name)
         raise AttributeError(name)
 
-    type(_tf).__getattr__ = _safe_getattr
+    # MagicMock instances accept attribute assignment but have no settable
+    # __getattr__ on the type; guard so the real-package path still patches.
+    with contextlib.suppress(TypeError, AttributeError):
+        type(_tf).__getattr__ = _safe_getattr
     _tf._test_patched = True
 
 # ---------------------------------------------------------------------------
@@ -163,14 +179,17 @@ SAMPLE_TEXTS = {
 
 
 def _make_mock_loaded_model():
-    """Create a mock LoadedModel that returns deterministic predictions.
+    """Create a mock LoadedModel matching the ONNX-runtime field shape.
 
-    Returns sub_class_id=0 with confidence=0.95 for any input.
+    The real LoadedModel holds an ORT ``session`` plus the tokenizer, the set of
+    input names the graph expects, and ``max_length``. Prediction is mocked at a
+    higher level (``_make_mock_predict_single``), so the session never actually
+    runs here; this just mirrors the dataclass fields.
     """
     loaded = MagicMock()
-    loaded.model = MagicMock()
+    loaded.session = MagicMock()
     loaded.tokenizer = MagicMock()
-    loaded.device = MagicMock()
+    loaded.input_names = frozenset({"input_ids", "attention_mask"})
     loaded.max_length = 128
     return loaded
 

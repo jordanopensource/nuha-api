@@ -688,3 +688,318 @@ class TestPredictSingleLabelLogic:
         mock_loaded = MagicMock()
         result = _predict_single("   ", mock_loaded, cfg, "ar")
         assert result.is_valid is False
+
+
+# =============================================================================
+# ONNX Runtime inference path
+# =============================================================================
+#
+# Exercises the real ONNX inference helpers and the _predict_single/_predict_batch
+# numpy path with a FAKE InferenceSession (returns canned logits). These lock in
+# the migration behaviour: numpy softmax/argmax, feeding only the input names the
+# graph declares (BERT needs token_type_ids, XLM-R does not), and the
+# (predicted_id, confidence) cache contract.
+
+
+class _FakeSession:
+    """Stand-in for ort.InferenceSession.
+
+    ``run`` records the feed dict it was called with and returns the configured
+    logits (shape (batch, num_labels)). ``get_inputs`` reports the declared input
+    names so _build_onnx_inputs can filter against them.
+    """
+
+    def __init__(self, logits, input_names=("input_ids", "attention_mask")):
+        import numpy as np
+
+        self._logits = np.asarray(logits, dtype="float32")
+        self._input_names = list(input_names)
+        self.calls = []
+
+    def get_inputs(self):
+        return [type("Inp", (), {"name": n}) for n in self._input_names]
+
+    def run(self, output_names, feed):
+        self.calls.append(feed)
+        # Return one logits row per input row (so batches line up).
+        n = len(next(iter(feed.values())))
+        return [self._logits[:n]]
+
+
+def _make_loaded(session, input_names=("input_ids", "attention_mask"), max_length=8):
+    """Build a real LoadedModel wrapping a fake session + a fake tokenizer.
+
+    The fake tokenizer returns numpy arrays for input_ids/attention_mask, and
+    also token_type_ids (as a real BERT tokenizer would) so we can prove
+    _build_onnx_inputs drops it for an XLM-R-style graph.
+    """
+    import numpy as np
+
+    from app.classifier import LoadedModel
+
+    def fake_tokenizer(text, **kwargs):
+        batch = text if isinstance(text, list) else [text]
+        rows = len(batch)
+        cols = 4
+        return {
+            "input_ids": np.ones((rows, cols), dtype=np.int64),
+            "attention_mask": np.ones((rows, cols), dtype=np.int64),
+            "token_type_ids": np.zeros((rows, cols), dtype=np.int64),
+        }
+
+    return LoadedModel(
+        session=session,
+        tokenizer=fake_tokenizer,
+        input_names=frozenset(input_names),
+        max_length=max_length,
+    )
+
+
+class TestSoftmaxArgmax:
+    """_softmax_argmax: numerically-stable row-wise softmax + argmax."""
+
+    def test_argmax_picks_largest_logit(self):
+        import numpy as np
+
+        from app.classifier import _softmax_argmax
+
+        conf, pred = _softmax_argmax(np.array([[0.1, 5.0, 0.2]]))
+        assert int(pred[0]) == 1
+        assert 0.0 <= float(conf[0]) <= 1.0
+
+    def test_probabilities_sum_to_one(self):
+        import numpy as np
+
+        from app.classifier import _softmax_argmax
+
+        logits = np.array([[2.0, 1.0, 0.5, -1.0]])
+        shifted = logits - np.max(logits, axis=-1, keepdims=True)
+        exp = np.exp(shifted)
+        probs = exp / np.sum(exp, axis=-1, keepdims=True)
+        assert abs(float(probs.sum()) - 1.0) < 1e-6
+        conf, _ = _softmax_argmax(logits)
+        assert abs(float(conf[0]) - float(probs.max())) < 1e-6
+
+    def test_stable_with_large_logits(self):
+        """Large logits do not overflow (stable softmax subtracts the row max)."""
+        import numpy as np
+
+        from app.classifier import _softmax_argmax
+
+        conf, pred = _softmax_argmax(np.array([[1000.0, 1001.0]]))
+        assert int(pred[0]) == 1
+        assert np.isfinite(conf[0])
+
+    def test_batch_rows_independent(self):
+        import numpy as np
+
+        from app.classifier import _softmax_argmax
+
+        _conf, pred = _softmax_argmax(np.array([[5.0, 0.0], [0.0, 5.0]]))
+        assert list(pred) == [0, 1]
+
+
+class TestBuildOnnxInputs:
+    """_build_onnx_inputs: feed only the names the ONNX graph declares."""
+
+    def test_bert_includes_token_type_ids(self):
+        from app.classifier import _build_onnx_inputs
+
+        loaded = _make_loaded(
+            _FakeSession([[0.0, 1.0]]),
+            input_names=("input_ids", "attention_mask", "token_type_ids"),
+        )
+        tokenized = loaded.tokenizer("نص")
+        feed = _build_onnx_inputs(loaded, tokenized)
+        assert set(feed) == {"input_ids", "attention_mask", "token_type_ids"}
+
+    def test_xlmr_excludes_token_type_ids(self):
+        """An XLM-R graph (no token_type_ids input) must not be fed token_type_ids."""
+        from app.classifier import _build_onnx_inputs
+
+        loaded = _make_loaded(
+            _FakeSession([[0.0, 1.0]]),
+            input_names=("input_ids", "attention_mask"),
+        )
+        tokenized = loaded.tokenizer("نص")  # tokenizer still produces token_type_ids
+        feed = _build_onnx_inputs(loaded, tokenized)
+        assert "token_type_ids" not in feed
+        assert set(feed) == {"input_ids", "attention_mask"}
+
+    def test_feeds_are_int64(self):
+        import numpy as np
+
+        from app.classifier import _build_onnx_inputs
+
+        loaded = _make_loaded(_FakeSession([[0.0, 1.0]]))
+        feed = _build_onnx_inputs(loaded, loaded.tokenizer("نص"))
+        for arr in feed.values():
+            assert arr.dtype == np.int64
+
+    def test_bert_graph_synthesizes_missing_token_type_ids(self):
+        """A BERT graph requires token_type_ids, but transformers 5.x's fast
+        tokenizer (TokenizersBackend) omits it by default. _build_onnx_inputs must
+        synthesize an all-zeros column so the required graph input is present —
+        otherwise ORT 500s with "Required inputs (['token_type_ids']) are missing"
+        (the real failure that hit the arz dialect)."""
+        import numpy as np
+
+        from app.classifier import _build_onnx_inputs
+
+        loaded = _make_loaded(
+            _FakeSession([[0.0, 1.0]]),
+            input_names=("input_ids", "attention_mask", "token_type_ids"),
+        )
+        # Tokenizer output WITHOUT token_type_ids (as the 5.x fast tokenizer gives).
+        tokenized = {
+            "input_ids": np.ones((1, 4), dtype=np.int64),
+            "attention_mask": np.ones((1, 4), dtype=np.int64),
+        }
+        feed = _build_onnx_inputs(loaded, tokenized)
+        assert "token_type_ids" in feed
+        assert feed["token_type_ids"].shape == feed["input_ids"].shape
+        assert not feed["token_type_ids"].any()  # all zeros (single-sequence segment id)
+
+
+class TestTokenTypeIdsRequest:
+    """Regression: a BERT dialect whose tokenizer omits token_type_ids by default.
+
+    transformers 5.x's TokenizersBackend returns only input_ids/attention_mask
+    unless return_token_type_ids=True is passed; the BERT ONNX graph requires
+    token_type_ids. _predict_* must still feed it (via the explicit request or the
+    zeros backstop) so inference does not 500. Earlier tests used a tokenizer that
+    always returned token_type_ids, so they missed this.
+    """
+
+    def _bert_loaded(self, session):
+        """LoadedModel with a BERT graph and a tokenizer that only emits
+        token_type_ids when return_token_type_ids=True (like TokenizersBackend)."""
+        import numpy as np
+
+        from app.classifier import LoadedModel
+
+        def fake_tokenizer(text, **kwargs):
+            batch = text if isinstance(text, list) else [text]
+            rows, cols = len(batch), 4
+            out = {
+                "input_ids": np.ones((rows, cols), dtype=np.int64),
+                "attention_mask": np.ones((rows, cols), dtype=np.int64),
+            }
+            if kwargs.get("return_token_type_ids"):
+                out["token_type_ids"] = np.zeros((rows, cols), dtype=np.int64)
+            return out
+
+        return LoadedModel(
+            session=session,
+            tokenizer=fake_tokenizer,
+            input_names=frozenset(("input_ids", "attention_mask", "token_type_ids")),
+            max_length=8,
+        )
+
+    def _cfg(self):
+        from app.classifier import DialectConfig
+
+        return DialectConfig(
+            name="bert-test",
+            model_path="/test",
+            preprocess_fn=lambda x: x.strip(),
+            sub_to_main={0: 0, 1: 1},
+            sub_labels={"ara": {0: "neutral", 1: "violence"}},
+            main_labels={"ara": {0: "neutral_m", 1: "violence_m"}},
+        )
+
+    def test_single_feeds_token_type_ids_to_bert_graph(self):
+        from app.classifier import _inference_cache, _predict_single
+
+        _inference_cache._cache.clear()
+        session = _FakeSession(
+            [[0.1, 9.0]], input_names=("input_ids", "attention_mask", "token_type_ids")
+        )
+        loaded = self._bert_loaded(session)
+        result = _predict_single("نص عربي", loaded, self._cfg(), "ara")
+        assert result.is_valid is True
+        assert result.sub_class == "violence"
+        # The fed dict reaching the session must carry token_type_ids.
+        assert "token_type_ids" in session.calls[0]
+
+    def test_batch_feeds_token_type_ids_to_bert_graph(self):
+        from app.classifier import _inference_cache, _predict_batch
+
+        _inference_cache._cache.clear()
+        # Two distinct texts => two cache misses => the fake session must return
+        # two logit rows (it slices [:n] by the input row count).
+        session = _FakeSession(
+            [[0.1, 9.0], [0.1, 9.0]],
+            input_names=("input_ids", "attention_mask", "token_type_ids"),
+        )
+        loaded = self._bert_loaded(session)
+        results = _predict_batch(["نص اول", "نص ثاني"], loaded, self._cfg(), "ara")
+        assert all(r.is_valid for r in results)
+        assert "token_type_ids" in session.calls[0]
+
+
+class TestPredictWithFakeSession:
+    """_predict_single/_predict_batch over the real numpy path with a fake session."""
+
+    def _cfg(self):
+        from app.classifier import DialectConfig
+
+        return DialectConfig(
+            name="test",
+            model_path="/test",
+            preprocess_fn=lambda x: x.strip(),
+            sub_to_main={0: 0, 1: 1},
+            sub_labels={"ara": {0: "neutral", 1: "violence"}},
+            main_labels={"ara": {0: "neutral_m", 1: "violence_m"}},
+        )
+
+    def test_single_prediction_uses_argmax_label(self):
+        from app.classifier import _inference_cache, _predict_single
+
+        _inference_cache._cache.clear()
+        # logits favour class 1
+        loaded = _make_loaded(_FakeSession([[0.1, 9.0]]))
+        result = _predict_single("نص عربي", loaded, self._cfg(), "ara")
+        assert result.is_valid is True
+        assert result.sub_class == "violence"
+        assert result.main_class == "violence_m"
+        assert 0.0 <= result.confidence <= 1.0
+
+    def test_single_prediction_caches_raw_prediction(self):
+        from app.classifier import _inference_cache, _predict_single
+
+        _inference_cache._cache.clear()
+        session = _FakeSession([[0.1, 9.0]])
+        loaded = _make_loaded(session)
+        cfg = self._cfg()
+        _predict_single("نص عربي", loaded, cfg, "ara")
+        # Second call with same text must hit the cache (no second run()).
+        _predict_single("نص عربي", loaded, cfg, "ara")
+        assert len(session.calls) == 1
+        cached = _inference_cache.get("نص عربي")
+        assert cached is not None
+        assert cached[0] == 1  # predicted_id stored
+
+    def test_batch_only_runs_inference_on_cache_misses(self):
+        from app.classifier import _inference_cache, _predict_batch
+
+        _inference_cache._cache.clear()
+        session = _FakeSession([[0.1, 9.0]])
+        loaded = _make_loaded(session)
+        cfg = self._cfg()
+        # Prime the cache with one of the two texts.
+        _inference_cache.put("repeat", (1, 0.99))
+        results = _predict_batch(["repeat", "fresh"], loaded, cfg, "ara")
+        assert all(r.is_valid for r in results)
+        # Only the single miss ("fresh") was sent to the session.
+        assert len(session.calls) == 1
+        assert len(next(iter(session.calls[0].values()))) == 1
+
+    def test_batch_empty_and_valid_mix(self):
+        from app.classifier import _inference_cache, _predict_batch
+
+        _inference_cache._cache.clear()
+        loaded = _make_loaded(_FakeSession([[0.1, 9.0]]))
+        results = _predict_batch(["", "نص"], loaded, self._cfg(), "ara")
+        assert results[0].is_valid is False
+        assert results[1].is_valid is True
