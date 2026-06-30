@@ -335,8 +335,8 @@ nginx terminates client connections and routes by dialect. It also:
 - Serves its own `/health` with a 200 instead of proxying to a backend.
 - Serves the docs from the default dialect's backend, since docs do not depend on
   the dialect.
-- Accepts request bodies up to 25 MiB, which covers a maximal batch of Arabic or
-  Kurdish text.
+- Accepts request bodies up to 10 MiB, which covers a normal batch of Arabic or
+  Kurdish text and rejects oversized ones before they reach a backend.
 - Keeps client-facing timeouts tight, but allows a long read timeout (155s) on
   the classify routes so a slow batch is not cut off. That timeout sits just
   above the app's full latency budget (`INFERENCE_QUEUE_TIMEOUT + INFERENCE_TIMEOUT`,
