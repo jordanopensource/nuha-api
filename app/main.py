@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 class ClassifyRequest(BaseModel):
     """Request body for single text classification."""
 
-    text: Annotated[str, Field(min_length=1, max_length=10000, description="Text to classify")]
+    text: Annotated[str, Field(min_length=1, max_length=50000, description="Text to classify")]
 
     model_config = {
         "json_schema_extra": {
@@ -87,7 +87,7 @@ class BatchClassifyRequest(BaseModel):
     """Request body for batch text classification."""
 
     texts: Annotated[
-        list[Annotated[str, Field(max_length=10000)]],
+        list[Annotated[str, Field(max_length=50000)]],
         Field(
             min_length=1,
             max_length=MAX_BATCH_SIZE,

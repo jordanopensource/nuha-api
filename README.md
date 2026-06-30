@@ -268,9 +268,9 @@ curl -X POST "http://localhost:8000/classify/batch?dialect=arz&lang=en" \
 
 ### Validation and status codes
 
-- `text` on `/classify` must be 1 to 10000 characters. Empty text is a 422.
+- `text` on `/classify` must be 1 to 50000 characters. Empty text is a 422.
 - `texts` on `/classify/batch` must be a non-empty list, up to `MAX_BATCH_SIZE`
-  items (1000 by default). Each text is capped at 10000 characters, but there is
+  items (1000 by default). Each text is capped at 50000 characters, but there is
   no minimum: an empty string in a batch comes back with `is_valid=false` rather
   than failing the whole request.
 
