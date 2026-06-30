@@ -111,6 +111,22 @@ INFERENCE_TIMEOUT = _parse_bounded_int("INFERENCE_TIMEOUT", 120, 1, 3600)
 # raise this and lower CLASSIFIER_WORKERS to keep their product near the cpu cap.
 ORT_INTRA_OP_THREADS = _parse_bounded_int("ORT_INTRA_OP_THREADS", 1, 1, 32)
 
+# Bounded admission queue in front of the CLASSIFIER_WORKERS execution slots. A
+# request that finds every slot busy waits up to INFERENCE_QUEUE_TIMEOUT seconds
+# for one to free instead of being shed immediately, so a short burst is served
+# rather than 503'd the instant both workers are busy. At most
+# CLASSIFIER_WORKERS + INFERENCE_QUEUE_SIZE requests are in flight (running +
+# waiting); beyond that, or once the wait deadline passes, we shed a fast 503 so
+# latency and memory stay bounded under genuine sustained overload. Set
+# INFERENCE_QUEUE_SIZE=0 to restore the original no-queue, shed-immediately
+# behavior. The queue smooths bursts; it does not add throughput — sustained load
+# above capacity still sheds (scale with replicas / faster inference instead).
+INFERENCE_QUEUE_SIZE = _parse_bounded_int("INFERENCE_QUEUE_SIZE", 32, 0, 10000)
+# Max seconds a request waits for a slot before shedding 503. Part of the request
+# latency budget: nginx proxy_read_timeout must stay above
+# INFERENCE_QUEUE_TIMEOUT + INFERENCE_TIMEOUT so the app owns its own 503/504.
+INFERENCE_QUEUE_TIMEOUT = _parse_bounded_int("INFERENCE_QUEUE_TIMEOUT", 30, 1, 600)
+
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 _raw_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 if _raw_log_level not in _VALID_LOG_LEVELS:
@@ -179,35 +195,65 @@ class InferenceTimeoutError(Exception):
 
 
 class _InferenceGate:
-    """Non-blocking concurrency limiter for inference.
+    """Bounded admission controller for inference.
 
-    ``try_acquire()`` atomically checks capacity and claims a slot in a single
-    synchronous step, then ``release()`` frees it. Unlike a check-then-acquire
-    pattern on ``asyncio.Semaphore``, there is no ``await`` between the capacity
-    check and the claim, so the count cannot drift under concurrency. Callers
-    that find every slot taken get a fast 503 instead of queuing (H-1).
+    Two layers:
 
-    Safe under asyncio's single-threaded cooperative scheduling: neither method
-    awaits, so the read-modify-write is never interleaved with another task.
+    * **Admission** — ``try_admit()`` atomically checks the in-flight count
+      (running + waiting) against ``limit + queue_size`` and claims a place in a
+      single synchronous step. There is no ``await`` between the check and the
+      bump, so the count cannot drift under asyncio's cooperative scheduling.
+      Over the cap, callers get a fast 503 instead of piling up without bound.
+    * **Execution slots** — at most ``limit`` inferences run at once (one per
+      CPU under the tuning model), governed by an ``asyncio.Semaphore``. An
+      admitted request waits on ``acquire_slot()`` up to ``wait_timeout`` seconds
+      for a slot; this is the queue that lets a short burst be served instead of
+      shed the instant every worker is busy.
+
+    With ``queue_size == 0`` admission only ever succeeds when a slot is already
+    free, so ``acquire_slot()`` never waits — i.e. the original no-queue,
+    shed-immediately behavior. The slot is released when the worker thread
+    *actually* finishes (see ``_run_gated``), keeping the count honest under the
+    inference-timeout path.
     """
 
-    __slots__ = ("_in_use", "_limit")
+    __slots__ = ("_in_flight", "_limit", "_max_in_flight", "_slots", "_wait_timeout")
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, queue_size: int, wait_timeout: int) -> None:
         self._limit = limit
-        self._in_use = 0
+        self._max_in_flight = limit + queue_size
+        self._wait_timeout = wait_timeout
+        self._in_flight = 0
+        # Constructed at import (no running loop). asyncio.Semaphore binds to the
+        # loop lazily on first await (Python >= 3.10), so this is safe.
+        self._slots = asyncio.Semaphore(limit)
 
-    def try_acquire(self) -> bool:
-        """Claim a slot if one is free. Returns False if at capacity."""
-        if self._in_use >= self._limit:
+    def try_admit(self) -> bool:
+        """Claim an in-flight place if under the running+queued cap. Sync, no await."""
+        if self._in_flight >= self._max_in_flight:
             return False
-        self._in_use += 1
+        self._in_flight += 1
         return True
 
-    def release(self) -> None:
-        """Release a previously-claimed slot."""
-        if self._in_use > 0:
-            self._in_use -= 1
+    def drop_admission(self) -> None:
+        """Release an admission that never acquired a slot (e.g. wait timed out)."""
+        if self._in_flight > 0:
+            self._in_flight -= 1
+
+    async def acquire_slot(self) -> None:
+        """Wait (bounded) for an execution slot. Raises TimeoutError past the deadline.
+
+        Relies on Python >= 3.11 ``wait_for`` cancelling a not-yet-granted
+        ``Semaphore.acquire()`` without consuming a permit, so a timed-out wait
+        never leaks a slot (the runtime image is python:3.12).
+        """
+        await asyncio.wait_for(self._slots.acquire(), self._wait_timeout)
+
+    def release_slot(self) -> None:
+        """Free a slot held by a finished inference and drop its admission."""
+        self._slots.release()
+        if self._in_flight > 0:
+            self._in_flight -= 1
 
 
 def _get_executor() -> ThreadPoolExecutor:
@@ -683,7 +729,12 @@ def _predict_single(
             cleaned,
             truncation=True,
             max_length=loaded.max_length,
-            padding="max_length",
+            # No padding for a single sequence: pad to nothing, so a short text
+            # costs only its real token count instead of a fixed max_length (128)
+            # forward pass. The exported graphs have a dynamic sequence axis (the
+            # batch path relies on the same), so variable length is fine and this
+            # is the dominant single-classify latency win for short text.
+            padding=False,
             return_tensors="np",
             # BERT graphs require token_type_ids; ask for it explicitly so the
             # transformers 5.x fast tokenizer (which omits it by default) emits it.
@@ -801,12 +852,16 @@ def _predict_batch(
 # -----------------------------------------------------------------------------
 
 
-_inference_gate = _InferenceGate(CLASSIFIER_WORKERS)
+_inference_gate = _InferenceGate(CLASSIFIER_WORKERS, INFERENCE_QUEUE_SIZE, INFERENCE_QUEUE_TIMEOUT)
 
 
 async def _run_gated(fn: Callable, *args):
-    """Run a synchronous inference ``fn`` in the thread pool under the concurrency
-    gate and the per-request inference timeout.
+    """Run a synchronous inference ``fn`` in the thread pool under the admission
+    gate, the bounded slot wait, and the per-request inference timeout.
+
+    Flow: admit (fast 503 if the running+queued cap is full) → wait up to the
+    queue timeout for an execution slot (fast 503 if the deadline passes) → run
+    the inference off the event loop with a hard INFERENCE_TIMEOUT backstop (504).
 
     Two things make the slot accounting correct under timeout:
 
@@ -819,20 +874,35 @@ async def _run_gated(fn: Callable, *args):
        running inference, and the callback retrieves any exception so asyncio
        doesn't warn about it going unobserved on the timeout path.
 
-    On timeout the caller gets ``InferenceTimeoutError`` (surfaced as 504).
+    On overload the caller gets ``ServiceOverloadedError`` (503); on a stuck
+    inference, ``InferenceTimeoutError`` (504).
     """
-    if not _inference_gate.try_acquire():
-        raise ServiceOverloadedError("All inference workers are busy")
+    if not _inference_gate.try_admit():
+        raise ServiceOverloadedError("Inference queue is full")
+
+    # Hold an admission place. Until a slot is acquired and the done-callback is
+    # attached, this coroutine owns the admission and must drop it on every exit.
+    try:
+        await _inference_gate.acquire_slot()
+    except TimeoutError:
+        _inference_gate.drop_admission()
+        raise ServiceOverloadedError("Timed out waiting for an inference slot") from None
+    except BaseException:
+        # e.g. the request was cancelled (client disconnect) while queued.
+        _inference_gate.drop_admission()
+        raise
+
+    # Slot acquired. From the moment the callback is attached it owns releasing
+    # both the slot and the admission when the worker thread finishes.
     try:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(_get_executor(), fn, *args)
     except BaseException:
-        # Acquired but never scheduled the work, so don't leak the slot.
-        _inference_gate.release()
+        _inference_gate.release_slot()
         raise
 
     def _release_slot(fut: asyncio.Future) -> None:
-        _inference_gate.release()
+        _inference_gate.release_slot()
         if not fut.cancelled():
             fut.exception()  # observe result/exception so asyncio stays quiet
 

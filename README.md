@@ -282,7 +282,7 @@ The status codes you can get:
 | 400  | The proxy received an unknown `dialect` value                               |
 | 422  | Bad input, a `dialect` that does not match the backend, or an invalid `lang`|
 | 500  | An unexpected error (the body is generic, no stack trace leaks)            |
-| 503  | Every inference slot is busy (the service sheds load instead of queuing)   |
+| 503  | Overloaded: every slot is busy, the short queue is full, or a queued request waited too long |
 | 504  | An inference ran past `INFERENCE_TIMEOUT`, which means something is wrong   |
 
 The 400, 500, 503, and 504 codes are additions. The original 200 and 422
@@ -300,7 +300,9 @@ Anything dialect-specific (memory limit, replica count) is in
 |----------------------|------------------------|------------------------------------------------------------------------------|
 | `DIALECT`            | *(required)*           | Which dialect this container serves: `arz`, `acm`, or `ckb`. No default.       |
 | `MODEL_PATH`         | `./models/{DIALECT}`   | Where to load the model from. Derived from `DIALECT` if unset.                |
-| `CLASSIFIER_WORKERS` | `2`                    | Concurrent inference slots. Sizes both the thread pool and the 503 gate.      |
+| `CLASSIFIER_WORKERS` | `2`                    | How many inferences run at once. Sizes the thread pool and the gate's slots.  |
+| `INFERENCE_QUEUE_SIZE` | `32`                 | Requests that may wait for a slot before shedding 503. 0 = shed immediately.  |
+| `INFERENCE_QUEUE_TIMEOUT` | `10`              | Seconds a queued request waits for a slot before a 503.                       |
 | `ORT_INTRA_OP_THREADS`| `1`                   | ONNX Runtime threads per inference. Keep at 1 (see Deployment notes).         |
 | `INFERENCE_TIMEOUT`  | `120`                  | Per-request inference timeout in seconds. A safety backstop, not a tuning knob.|
 | `MAX_BATCH_SIZE`     | `1000`                 | Most texts allowed in one batch request.                                      |
@@ -351,7 +353,10 @@ and keep `ORT_INTRA_OP_THREADS` at 1. The product of the two should stay near
 the CPU limit: that runs `CLASSIFIER_WORKERS` single-threaded inferences, one per
 core. To favour fewer but faster (multi-threaded) batches over concurrency, raise
 `ORT_INTRA_OP_THREADS` and lower `CLASSIFIER_WORKERS` to keep that product the
-same.
+same. For responsiveness under load, give the backend a little CPU headroom above
+the inference slots (set `BACKEND_CPU_LIMIT` slightly above `CLASSIFIER_WORKERS`)
+so the event loop, tokenization, and health checks keep running while every slot
+is busy.
 
 The reason for pinning the per-inference threads is a real trap, and it is the
 same one the old torch build had. Left to its default, ONNX Runtime sizes its
@@ -363,9 +368,17 @@ each inference on a single core, so the slots run one per core with no
 oversubscription. (This single variable replaces the two torch-only
 `OMP_NUM_THREADS` and `MKL_NUM_THREADS` knobs the PyTorch build used.)
 
-Each backend protects itself with a non-blocking gate sized to
-`CLASSIFIER_WORKERS`. When every slot is busy, the next request gets an immediate
-503 rather than piling up in a queue. There is also a per-request timeout: an
+Each backend protects itself with a bounded admission gate. At most
+`CLASSIFIER_WORKERS` inferences run at once; a request that finds every slot busy
+waits up to `INFERENCE_QUEUE_TIMEOUT` seconds for one to free instead of being
+shed immediately, so a short burst is served (200) rather than rejected the
+instant both workers are busy. Once `CLASSIFIER_WORKERS + INFERENCE_QUEUE_SIZE`
+requests are in flight, or a queued request waits past the timeout, the backend
+sheds a fast 503 — so latency and memory stay bounded under genuine sustained
+overload. The queue smooths bursts within capacity; it does not add throughput,
+so scale with replicas (and keep inference fast) to raise the ceiling. Set
+`INFERENCE_QUEUE_SIZE=0` for the original no-queue, shed-immediately behavior.
+There is also a per-request timeout: an
 inference that runs past `INFERENCE_TIMEOUT` returns a 504. That timeout is a
 backstop for something genuinely stuck, not a tuning knob, so set it well above
 your worst-case batch time. A full 1000-text batch is a single inference that can

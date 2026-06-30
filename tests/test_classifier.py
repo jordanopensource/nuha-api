@@ -150,52 +150,102 @@ class TestExecutorManagement:
 
 
 # =============================================================================
-# _InferenceGate (non-blocking overload limiter)
+# _InferenceGate (bounded admission + slot queue)
 # =============================================================================
 
 
 class TestInferenceGate:
-    """Direct tests for the non-blocking concurrency gate (H-1)."""
+    """Direct tests for the admission cap and the bounded execution-slot queue."""
 
-    def test_acquires_up_to_limit(self):
-        """try_acquire() succeeds exactly `limit` times, then refuses."""
+    def test_admits_up_to_limit_plus_queue(self):
+        """try_admit() succeeds exactly `limit + queue_size` times, then refuses."""
         from app.classifier import _InferenceGate
 
-        gate = _InferenceGate(2)
-        assert gate.try_acquire() is True
-        assert gate.try_acquire() is True
-        assert gate.try_acquire() is False  # at capacity
+        gate = _InferenceGate(2, 3, 10)  # cap = 5 in flight
+        assert [gate.try_admit() for _ in range(5)] == [True, True, True, True, True]
+        assert gate.try_admit() is False  # running + queued cap reached
 
-    def test_release_frees_a_slot(self):
-        """Releasing a slot lets the next try_acquire() succeed again."""
+    def test_queue_zero_admits_only_limit(self):
+        """queue_size=0 restores the old shed-immediately behavior (cap == limit)."""
         from app.classifier import _InferenceGate
 
-        gate = _InferenceGate(1)
-        assert gate.try_acquire() is True
-        assert gate.try_acquire() is False
-        gate.release()
-        assert gate.try_acquire() is True
+        gate = _InferenceGate(2, 0, 10)
+        assert gate.try_admit() is True
+        assert gate.try_admit() is True
+        assert gate.try_admit() is False  # no queue, so cap is the slot count
 
-    def test_release_never_goes_negative(self):
-        """Extra releases can't push capacity above the limit."""
+    def test_drop_admission_frees_an_admission(self):
+        """drop_admission() (admitted but never got a slot) reopens a place."""
         from app.classifier import _InferenceGate
 
-        gate = _InferenceGate(1)
-        gate.release()  # nothing acquired — must be a no-op
-        gate.release()
-        assert gate.try_acquire() is True
-        assert gate.try_acquire() is False  # still only one slot
+        gate = _InferenceGate(1, 0, 10)
+        assert gate.try_admit() is True
+        assert gate.try_admit() is False
+        gate.drop_admission()
+        assert gate.try_admit() is True
 
-    def test_full_cycle_restores_capacity(self):
-        """Acquire then release the same number of times returns to full."""
+    def test_drop_admission_never_goes_negative(self):
+        """Extra drops can't push the in-flight count below zero / above the cap."""
         from app.classifier import _InferenceGate
 
-        gate = _InferenceGate(3)
-        assert [gate.try_acquire() for _ in range(3)] == [True, True, True]
-        assert gate.try_acquire() is False
-        for _ in range(3):
-            gate.release()
-        assert [gate.try_acquire() for _ in range(3)] == [True, True, True]
+        gate = _InferenceGate(1, 0, 10)
+        gate.drop_admission()  # nothing admitted — must be a no-op
+        gate.drop_admission()
+        assert gate.try_admit() is True
+        assert gate.try_admit() is False  # still only one place
+
+    def test_acquire_slot_grants_up_to_limit_then_times_out(self):
+        """acquire_slot() grants `limit` slots immediately; the next wait times out."""
+        import asyncio
+
+        from app.classifier import _InferenceGate
+
+        gate = _InferenceGate(2, 5, 0.05)  # tiny wait so the timeout path is fast
+
+        async def go():
+            await gate.acquire_slot()
+            await gate.acquire_slot()  # both slots now held
+            with pytest.raises(TimeoutError):
+                await gate.acquire_slot()  # no slot frees within the wait window
+
+        asyncio.run(go())
+
+    def test_release_slot_lets_a_waiter_proceed(self):
+        """A request blocked on acquire_slot() proceeds once a slot is released."""
+        import asyncio
+
+        from app.classifier import _InferenceGate
+
+        gate = _InferenceGate(1, 5, 5)
+
+        async def go():
+            await gate.acquire_slot()  # hold the only slot
+            waiter = asyncio.create_task(gate.acquire_slot())
+            await asyncio.sleep(0.05)
+            assert not waiter.done()  # still queued, not shed
+            gate.release_slot()  # free the slot
+            await asyncio.wait_for(waiter, 1.0)  # waiter now proceeds
+            assert waiter.done()
+
+        asyncio.run(go())
+
+    def test_release_slot_frees_slot_and_admission(self):
+        """release_slot() frees both a slot and an admission place."""
+        import asyncio
+
+        from app.classifier import _InferenceGate
+
+        gate = _InferenceGate(1, 0, 5)
+
+        async def go():
+            assert gate.try_admit() is True
+            await gate.acquire_slot()
+            assert gate.try_admit() is False  # cap reached
+            gate.release_slot()  # frees slot + admission
+            assert gate.try_admit() is True
+            await gate.acquire_slot()  # slot available again
+
+        asyncio.run(go())
 
 
 # =============================================================================
@@ -218,7 +268,7 @@ class TestInferenceTimeout:
         # Tiny timeout; a worker that runs well past it. Patch the gate so we can
         # observe slot accounting in isolation.
         monkeypatch.setattr(clf, "INFERENCE_TIMEOUT", 0.1)
-        gate = clf._InferenceGate(1)
+        gate = clf._InferenceGate(1, 0, 10)  # single slot, no queue
         monkeypatch.setattr(clf, "_inference_gate", gate)
 
         finished = threading.Event()
@@ -232,11 +282,11 @@ class TestInferenceTimeout:
             with pytest.raises(clf.InferenceTimeoutError):
                 await clf._run_gated(slow_fn)
             # The worker is still running, so its slot must NOT have been freed.
-            assert gate.try_acquire() is False
+            assert gate.try_admit() is False
             # Once the abandoned worker completes, the done-callback frees it.
             assert finished.wait(3.0) is True
             await asyncio.sleep(0.1)  # let the loop run the done-callback
-            assert gate.try_acquire() is True
+            assert gate.try_admit() is True
 
         asyncio.run(go())
 
@@ -247,14 +297,98 @@ class TestInferenceTimeout:
         import app.classifier as clf
 
         monkeypatch.setattr(clf, "INFERENCE_TIMEOUT", 5)
-        gate = clf._InferenceGate(1)
+        gate = clf._InferenceGate(1, 0, 10)
         monkeypatch.setattr(clf, "_inference_gate", gate)
 
         async def go():
             result = await clf._run_gated(lambda *_a: "ok")
             assert result == "ok"
             await asyncio.sleep(0.05)  # let the done-callback free the slot
-            assert gate.try_acquire() is True
+            assert gate.try_admit() is True
+
+        asyncio.run(go())
+
+
+# =============================================================================
+# Bounded queueing through _run_gated (serve bursts, shed only past the cap)
+# =============================================================================
+
+
+class TestRunGatedQueue:
+    """End-to-end gate behavior: a burst within capacity is served, not shed; a
+    503 is raised only when the running+queued cap is full or the wait deadline
+    passes."""
+
+    def test_burst_within_capacity_all_served(self, monkeypatch):
+        """3 concurrent requests with 1 slot + queue of 2 all return (none shed)."""
+        import asyncio
+        import time
+
+        import app.classifier as clf
+
+        monkeypatch.setattr(clf, "INFERENCE_TIMEOUT", 5)
+        monkeypatch.setattr(clf, "_inference_gate", clf._InferenceGate(1, 2, 5))
+
+        def work(*_a):
+            time.sleep(0.05)
+            return "ok"
+
+        async def go():
+            results = await asyncio.gather(
+                clf._run_gated(work), clf._run_gated(work), clf._run_gated(work)
+            )
+            assert results == ["ok", "ok", "ok"]  # all served, queued not shed
+
+        asyncio.run(go())
+
+    def test_beyond_capacity_sheds_503(self, monkeypatch):
+        """Past the running+queued cap, the next request gets an immediate 503."""
+        import asyncio
+        import threading
+
+        import app.classifier as clf
+
+        monkeypatch.setattr(clf, "INFERENCE_TIMEOUT", 5)
+        monkeypatch.setattr(clf, "_inference_gate", clf._InferenceGate(1, 1, 5))  # cap 2
+        release = threading.Event()
+
+        def blocking(*_a):
+            release.wait(3.0)
+            return "ok"
+
+        async def go():
+            t1 = asyncio.create_task(clf._run_gated(blocking))  # runs, holds the slot
+            t2 = asyncio.create_task(clf._run_gated(blocking))  # admitted, queued
+            await asyncio.sleep(0.1)  # let both be admitted
+            with pytest.raises(clf.ServiceOverloadedError):
+                await clf._run_gated(lambda *_a: "ok")  # cap full -> fast 503
+            release.set()
+            await asyncio.gather(t1, t2)
+
+        asyncio.run(go())
+
+    def test_wait_timeout_sheds_503(self, monkeypatch):
+        """A request that waits past INFERENCE_QUEUE_TIMEOUT for a slot gets 503."""
+        import asyncio
+        import threading
+
+        import app.classifier as clf
+
+        monkeypatch.setattr(clf, "INFERENCE_TIMEOUT", 5)
+        monkeypatch.setattr(clf, "_inference_gate", clf._InferenceGate(1, 5, 0.05))
+        release = threading.Event()
+
+        def blocking(*_a):
+            release.wait(3.0)
+            return "ok"
+
+        async def go():
+            t1 = asyncio.create_task(clf._run_gated(blocking))  # holds the only slot
+            await asyncio.sleep(0.05)
+            with pytest.raises(clf.ServiceOverloadedError):
+                await clf._run_gated(lambda *_a: "ok")  # waits, then sheds 503
+            release.set()
+            await t1
 
         asyncio.run(go())
 
