@@ -1,4 +1,4 @@
-# Template for compose.yml — edit THIS file, then run:
+# Template for compose.yml. Edit THIS file, then run:
 #   python scripts/render_config.py
 # The generated compose.yml has one backend service per app/dialects/<code>.json
 # (each with its own mem_limit from that file) plus the proxy's depends_on, so
@@ -9,7 +9,7 @@
 # --build-arg DIALECT=<code> (see the generated per-service build sections).
 # `docker compose build` produces all per-dialect images; `docker compose up`
 # runs them. The image/build/DIALECT lines are per-dialect, so they are rendered
-# per service — only the truly shared bits live in this anchor.
+# per service; only the truly shared bits live in this anchor.
 name: nuha-api
 
 x-backend: &backend

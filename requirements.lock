@@ -13,7 +13,7 @@
 #     "pip install pip-tools==7.5.3 && cd /in && pip-compile --generate-hashes \
 #      --allow-unsafe --no-strip-extras --output-file=/out/requirements.lock requirements.txt"
 #
-# Inference is ONNX Runtime (CPU), a normal PyPI package — no custom wheel index
+# Inference is ONNX Runtime (CPU), a normal PyPI package, so no custom wheel index
 # is needed (unlike the old torch +cpu build, which required the PyTorch CPU
 # index here). transformers is kept only for AutoTokenizer.
 #

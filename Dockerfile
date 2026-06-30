@@ -11,7 +11,7 @@
 #   docker build --build-arg DIALECT=arz -t nuha-api:arz .
 #   docker build --build-arg DIALECT=acm -t nuha-api:acm .
 #   docker build --build-arg DIALECT=ckb -t nuha-api:ckb .
-# (compose does this for you — see compose.yml's per-service build section.)
+# (compose does this for you: see compose.yml's per-service build section.)
 # =============================================================================
 
 
@@ -114,7 +114,7 @@ COPY --from=model-downloader --chown=appuser:appuser /models/${DIALECT} ./models
 COPY --chown=appuser:appuser app/ ./app/
 
 # Bake the dialect this image was built for as the default DIALECT. compose
-# still sets DIALECT per service (and it MUST match this baked value — the
+# still sets DIALECT per service (and it MUST match this baked value: the
 # build-arg controls which model is PRESENT, the env controls which the app
 # loads). The default just makes a bare `docker run` of this image work.
 # MODEL_PATH auto-derives from DIALECT (./models/{DIALECT}) if not set.

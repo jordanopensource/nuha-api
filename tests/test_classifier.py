@@ -189,7 +189,7 @@ class TestInferenceGate:
         from app.classifier import _InferenceGate
 
         gate = _InferenceGate(1, 0, 10)
-        gate.drop_admission()  # nothing admitted — must be a no-op
+        gate.drop_admission()  # nothing admitted, must be a no-op
         gate.drop_admission()
         assert gate.try_admit() is True
         assert gate.try_admit() is False  # still only one place
@@ -973,8 +973,8 @@ class TestBuildOnnxInputs:
     def test_bert_graph_synthesizes_missing_token_type_ids(self):
         """A BERT graph requires token_type_ids, but transformers 5.x's fast
         tokenizer (TokenizersBackend) omits it by default. _build_onnx_inputs must
-        synthesize an all-zeros column so the required graph input is present —
-        otherwise ORT 500s with "Required inputs (['token_type_ids']) are missing"
+        synthesize an all-zeros column so the required graph input is present.
+        Otherwise ORT 500s with "Required inputs (['token_type_ids']) are missing"
         (the real failure that hit the arz dialect)."""
         import numpy as np
 

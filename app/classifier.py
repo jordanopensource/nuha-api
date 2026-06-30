@@ -119,7 +119,7 @@ ORT_INTRA_OP_THREADS = _parse_bounded_int("ORT_INTRA_OP_THREADS", 1, 1, 32)
 # waiting); beyond that, or once the wait deadline passes, we shed a fast 503 so
 # latency and memory stay bounded under genuine sustained overload. Set
 # INFERENCE_QUEUE_SIZE=0 to restore the original no-queue, shed-immediately
-# behavior. The queue smooths bursts; it does not add throughput — sustained load
+# behavior. The queue smooths bursts; it does not add throughput: sustained load
 # above capacity still sheds (scale with replicas / faster inference instead).
 INFERENCE_QUEUE_SIZE = _parse_bounded_int("INFERENCE_QUEUE_SIZE", 32, 0, 10000)
 # Max seconds a request waits for a slot before shedding 503. Part of the request
@@ -199,19 +199,19 @@ class _InferenceGate:
 
     Two layers:
 
-    * **Admission** — ``try_admit()`` atomically checks the in-flight count
+    * **Admission**: ``try_admit()`` atomically checks the in-flight count
       (running + waiting) against ``limit + queue_size`` and claims a place in a
       single synchronous step. There is no ``await`` between the check and the
       bump, so the count cannot drift under asyncio's cooperative scheduling.
       Over the cap, callers get a fast 503 instead of piling up without bound.
-    * **Execution slots** — at most ``limit`` inferences run at once (one per
+    * **Execution slots**: at most ``limit`` inferences run at once (one per
       CPU under the tuning model), governed by an ``asyncio.Semaphore``. An
       admitted request waits on ``acquire_slot()`` up to ``wait_timeout`` seconds
       for a slot; this is the queue that lets a short burst be served instead of
       shed the instant every worker is busy.
 
     With ``queue_size == 0`` admission only ever succeeds when a slot is already
-    free, so ``acquire_slot()`` never waits — i.e. the original no-queue,
+    free, so ``acquire_slot()`` never waits: the original no-queue,
     shed-immediately behavior. The slot is released when the worker thread
     *actually* finishes (see ``_run_gated``), keeping the count honest under the
     inference-timeout path.
