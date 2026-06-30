@@ -4,6 +4,7 @@
 
 # CI/CD
 .woodpecker/
+woodpecker-templates/
 
 # Python
 __pycache__/

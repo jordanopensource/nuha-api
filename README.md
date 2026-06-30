@@ -447,10 +447,11 @@ and rebuild. No application code changes.
    ```bash
    python scripts/render_config.py
    ```
-   This regenerates `compose.yml` (a new backend service for your dialect) and
-   the nginx routing (a new route for `?dialect=<code>`). The `render-config`
-   pre-commit hook also does this for you on commit, so you usually do not run it
-   by hand.
+   This regenerates `compose.yml` (a new backend service for your dialect), the
+   nginx routing (a new route for `?dialect=<code>`), and the per-dialect build
+   steps in the `.woodpecker` pipelines (so CI builds and publishes the new
+   image). The `render-config` pre-commit hook also does this for you on commit,
+   so you usually do not run it by hand.
 3. Build the image for the new dialect with `docker build --build-arg
    DIALECT=<code> -t nuha-api:<code> .` (or `docker compose build` to build them
    all). The model-download stage reads the dialect file and pulls your new
@@ -463,9 +464,10 @@ preprocessing family. In that case add a function to `_PREPROCESS_REGISTRY` in
 `preprocessing.type`. The existing `nuha` and `safa` preprocessors cover the
 current dialects.
 
-`compose.yml` and `nginx/dialects.conf.template` are generated. Do not hand-edit
-them. Edit the dialect files (or `compose.template.yml` for proxy-level changes)
-and re-render.
+`compose.yml`, `nginx/dialects.conf.template`, and the two `.woodpecker` pipelines
+are generated. Do not hand-edit them. Edit the dialect files, or the matching
+template for non-dialect changes (`compose.template.yml`, or
+`woodpecker-templates/{latest,stable}.yaml` for the CI pipelines), then re-render.
 
 ## Build
 
@@ -534,13 +536,15 @@ app/
                        The single source of truth.
 tests/                 pytest suite (the ML imports are mocked)
 scripts/
-  render_config.py     Regenerates compose.yml and the nginx routing from dialects/
+  render_config.py     Regenerates compose.yml, the nginx routing, and the .woodpecker pipelines from dialects/
 nginx.conf             Static proxy config; includes the generated routing
 nginx/
   dialects.conf.template  Generated routing map (one entry per dialect)
 Dockerfile             Three-stage per-dialect build (one model baked in)
 compose.template.yml   Hand-edited source for compose.yml
 compose.yml            Generated: three backends plus the proxy
+woodpecker-templates/  Hand-edited source for the .woodpecker pipelines
+.woodpecker/           Generated CI pipelines (one image per dialect, per channel)
 requirements.txt       Direct dependencies (onnxruntime, transformers, ...)
 requirements.lock      Generated, hashed lock installed by the Dockerfile
 requirements-test.txt  Test dependencies
