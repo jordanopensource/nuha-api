@@ -131,30 +131,30 @@ class TestKurdishLabels:
     def _load_labels(self, labels_data):
         self.labels = labels_data
 
-    def test_ckb_has_kurdish_sub_labels(self):
-        """Kurdish dialect has 'ckb' sub labels."""
-        assert "ckb" in self.labels["ckb"]["sub"]
-        assert len(self.labels["ckb"]["sub"]["ckb"]) > 0
+    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
+    def test_safa_dialect_has_kurdish_sub_labels(self, dialect):
+        """The SAFA dialects (acm, ckb) have 'ckb' sub labels."""
+        assert "ckb" in self.labels[dialect]["sub"]
+        assert len(self.labels[dialect]["sub"]["ckb"]) > 0
 
-    def test_ckb_has_kurdish_main_labels(self):
-        """Kurdish dialect has 'ckb' main labels."""
-        assert "ckb" in self.labels["ckb"]["main"]
-        assert len(self.labels["ckb"]["main"]["ckb"]) > 0
+    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
+    def test_safa_dialect_has_kurdish_main_labels(self, dialect):
+        """The SAFA dialects (acm, ckb) have 'ckb' main labels."""
+        assert "ckb" in self.labels[dialect]["main"]
+        assert len(self.labels[dialect]["main"]["ckb"]) > 0
 
-    def test_ckb_kurdish_labels_same_keys_as_ar(self):
-        """Kurdish sub/main labels have same keys as Arabic labels."""
-        entry = self.labels["ckb"]
+    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
+    def test_safa_kurdish_labels_same_keys_as_ar(self, dialect):
+        """Kurdish sub/main labels have the same keys as the Arabic labels."""
+        entry = self.labels[dialect]
         assert set(entry["sub"]["ckb"].keys()) == set(entry["sub"]["ara"].keys())
         assert set(entry["main"]["ckb"].keys()) == set(entry["main"]["ara"].keys())
 
-    @pytest.mark.parametrize("dialect", ["arz", "acm"])
-    def test_non_ckb_dialects_lack_kurdish_labels(self, dialect):
-        """Non-Kurdish dialects have no 'ckb' labels (or empty dicts)."""
-        entry = self.labels[dialect]
-        ckb_sub = entry["sub"].get("ckb", {})
-        ckb_main = entry["main"].get("ckb", {})
-        assert len(ckb_sub) == 0, f"Dialect '{dialect}' should not have Kurdish sub labels"
-        assert len(ckb_main) == 0, f"Dialect '{dialect}' should not have Kurdish main labels"
+    def test_arz_lacks_kurdish_labels(self):
+        """arz, the only non-SAFA dialect, has no 'ckb' labels (or empty dicts)."""
+        entry = self.labels["arz"]
+        assert len(entry["sub"].get("ckb", {})) == 0, "arz should not have Kurdish sub labels"
+        assert len(entry["main"].get("ckb", {})) == 0, "arz should not have Kurdish main labels"
 
 
 # =============================================================================
@@ -184,6 +184,11 @@ class TestSafaTaxonomy:
     def test_safa_same_sub_to_main_mapping(self):
         """Iraqi and Kurdish share the same sub_to_main mapping."""
         assert self.labels["acm"]["sub_to_main"] == self.labels["ckb"]["sub_to_main"]
+
+    def test_safa_share_kurdish_labels(self):
+        """Iraqi and Kurdish carry the identical Kurdish (ckb) label set."""
+        assert self.labels["acm"]["sub"]["ckb"] == self.labels["ckb"]["sub"]["ckb"]
+        assert self.labels["acm"]["main"]["ckb"] == self.labels["ckb"]["main"]["ckb"]
 
     def test_arz_different_structure(self):
         """Egyptian has a different structure (different sub/main counts)."""
@@ -228,16 +233,16 @@ class TestParseDialect:
         parsed = self._parse_dialect(dialect)
         assert set(parsed.keys()) == {"sub_to_main", "sub_labels", "main_labels"}
 
-    def test_ckb_has_nonempty_kurdish_labels(self):
-        """For ckb dialect, Kurdish sub/main labels are present and non-empty."""
-        parsed = self._parse_dialect("ckb")
+    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
+    def test_safa_has_nonempty_kurdish_labels(self, dialect):
+        """For the SAFA dialects (acm, ckb), Kurdish sub/main labels are present and non-empty."""
+        parsed = self._parse_dialect(dialect)
         assert len(parsed["sub_labels"]["ckb"]) > 0
         assert len(parsed["main_labels"]["ckb"]) > 0
 
-    @pytest.mark.parametrize("dialect", ["arz", "acm"])
-    def test_non_ckb_has_no_kurdish_labels(self, dialect):
-        """For non-ckb dialects, no Kurdish label group is present."""
-        parsed = self._parse_dialect(dialect)
+    def test_arz_has_no_kurdish_labels(self):
+        """For arz (the only non-SAFA dialect), no Kurdish label group is present."""
+        parsed = self._parse_dialect("arz")
         assert "ckb" not in parsed["sub_labels"]
         assert "ckb" not in parsed["main_labels"]
 

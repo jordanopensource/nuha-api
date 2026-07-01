@@ -66,7 +66,7 @@ one-file change, which I cover below.
 | Code  | Dialect         | Model       | HuggingFace repo          | Response languages |
 |-------|-----------------|-------------|---------------------------|--------------------|
 | `arz` | Egyptian Arabic | BERT        | `thejosango/nuha-arz-sub-onnx` | `ar`, `en`         |
-| `acm` | Iraqi Arabic    | BERT        | `thejosango/safa-acm-sub-onnx` | `ar`, `en`         |
+| `acm` | Iraqi Arabic    | BERT        | `thejosango/safa-acm-sub-onnx` | `ar`, `en`, `ckb`  |
 | `ckb` | Sorani Kurdish  | XLM-RoBERTa | `thejosango/safa-ckb-sub-onnx` | `ar`, `en`, `ckb`  |
 
 The dialect codes are [ISO 639-3](https://iso639-3.sil.org/) language codes:
@@ -170,13 +170,13 @@ The tests mock the ML imports, so you do not need the models present to run them
 ```bash
 pip install -r requirements-test.txt
 
-DIALECT=arz pytest    # 274 passed, a few skipped
-DIALECT=acm  pytest    # 274 passed, a few skipped
-DIALECT=ckb pytest    # 273 passed, a few skipped
+DIALECT=arz pytest    # 277 passed, a few skipped
+DIALECT=acm  pytest    # 275 passed, a few skipped
+DIALECT=ckb pytest    # 276 passed, a few skipped
 ```
 
-The `ckb` suite skips a few extra cases: they cover the Kurdish-only `lang=ckb`
-path, which the Arabic-and-English dialects do not have.
+Egyptian (`arz`) has only Arabic and English labels, so it skips the Kurdish
+`lang=ckb` cases; the SAFA dialects (Iraqi and Kurdish) both serve Kurdish labels.
 
 ## The API
 
@@ -197,8 +197,8 @@ Both classify endpoints take the same two query parameters.
   does not match the container, you get a 422. Leave it off and the request goes
   to the default dialect (Egyptian).
 - **`lang`** defaults to `ar`. It sets the language of the labels in the
-  response, not which model runs. It is `ar`, `en`, or `ckb`. `ckb` is only valid
-  on the Kurdish dialect; ask for it anywhere else and you get a 422.
+  response, not which model runs. It is `ar`, `en`, or `ckb`. `ckb` is valid on
+  the SAFA dialects (Iraqi and Kurdish); ask for it on Egyptian and you get a 422.
 
 ### Request and response shapes
 
@@ -252,6 +252,11 @@ curl -X POST "http://localhost:8000/classify?dialect=arz" \
 
 # Iraqi Arabic, English labels.
 curl -X POST "http://localhost:8000/classify?dialect=acm&lang=en" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "شلونك"}'
+
+# Iraqi Arabic classified, labels returned in Kurdish (both are SAFA dialects).
+curl -X POST "http://localhost:8000/classify?dialect=acm&lang=ckb" \
   -H "Content-Type: application/json" \
   -d '{"text": "شلونك"}'
 
