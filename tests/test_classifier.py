@@ -446,22 +446,22 @@ class TestLabelSelection:
         assert len(ACTIVE_CONFIG.sub_labels["eng"]) > 0
         assert len(ACTIVE_CONFIG.main_labels["eng"]) > 0
 
-    def test_ckb_labels_populated_for_ckb_dialect(self):
-        """For ckb dialect, Kurdish labels are present and non-empty."""
+    def test_ckb_labels_populated_for_safa_dialect(self):
+        """For the SAFA dialects (acm, ckb), Kurdish labels are present and non-empty."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "ckb":
-            pytest.skip("Only applies to ckb dialect")
+        if dialect not in ("acm", "ckb"):
+            pytest.skip("Only applies to the SAFA dialects (acm, ckb)")
 
         from app.classifier import ACTIVE_CONFIG
 
         assert len(ACTIVE_CONFIG.sub_labels["ckb"]) > 0
         assert len(ACTIVE_CONFIG.main_labels["ckb"]) > 0
 
-    def test_ckb_labels_absent_for_non_ckb_dialect(self):
-        """For non-ckb dialects, Kurdish labels are not present."""
+    def test_ckb_labels_absent_for_arz_dialect(self):
+        """For arz (no Kurdish labels), Kurdish labels are not present."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect == "ckb":
-            pytest.skip("Only applies to non-ckb dialects")
+        if dialect != "arz":
+            pytest.skip("Only applies to the arz dialect")
 
         from app.classifier import ACTIVE_CONFIG
 
@@ -637,21 +637,21 @@ class TestDialectAndLanguageConfig:
         assert "ara" in SUPPORTED_LANGUAGES
         assert "eng" in SUPPORTED_LANGUAGES
 
-    def test_ckb_dialect_supports_ckb_language(self):
-        """When DIALECT=ckb, SUPPORTED_LANGUAGES includes ckb."""
+    def test_safa_dialects_support_ckb_language(self):
+        """When DIALECT is a SAFA dialect (acm, ckb), SUPPORTED_LANGUAGES includes ckb."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "ckb":
-            pytest.skip("Only applies when DIALECT=ckb")
+        if dialect not in ("acm", "ckb"):
+            pytest.skip("Only applies to the SAFA dialects (acm, ckb)")
 
         from app.classifier import SUPPORTED_LANGUAGES
 
         assert "ckb" in SUPPORTED_LANGUAGES
 
-    def test_non_ckb_dialect_does_not_support_ckb_language(self):
-        """When DIALECT is not ckb, SUPPORTED_LANGUAGES excludes ckb."""
+    def test_arz_dialect_does_not_support_ckb_language(self):
+        """When DIALECT=arz (no Kurdish labels), SUPPORTED_LANGUAGES excludes ckb."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect == "ckb":
-            pytest.skip("Only applies when DIALECT is not ckb")
+        if dialect != "arz":
+            pytest.skip("Only applies when DIALECT=arz")
 
         from app.classifier import SUPPORTED_LANGUAGES
 
@@ -667,12 +667,12 @@ class TestNormalizeLang:
     """normalize_lang maps the active dialect's aliases to canonical ISO 639-3 codes."""
 
     def test_aliases_map_to_canonical(self):
-        """ar/en resolve on every dialect; ku resolves only where ckb is served."""
+        """ar/en resolve on every dialect; ku resolves on the SAFA dialects (acm, ckb)."""
         from app.classifier import normalize_lang
 
         assert normalize_lang("ar") == "ara"
         assert normalize_lang("en") == "eng"
-        if os.environ.get("DIALECT") == "ckb":
+        if os.environ.get("DIALECT") in ("acm", "ckb"):
             assert normalize_lang("ku") == "ckb"
 
     def test_canonical_passes_through(self):
@@ -689,11 +689,11 @@ class TestNormalizeLang:
         assert normalize_lang("xx") == "xx"
 
     def test_alias_map_for_active_dialect(self):
-        """LANGUAGE_ALIASES holds this dialect's two-letter aliases (ku only for ckb)."""
+        """LANGUAGE_ALIASES holds this dialect's two-letter aliases (ku on the SAFA dialects)."""
         from app.classifier import LANGUAGE_ALIASES
 
         expected = {"ar": "ara", "en": "eng"}
-        if os.environ.get("DIALECT") == "ckb":
+        if os.environ.get("DIALECT") in ("acm", "ckb"):
             expected["ku"] = "ckb"
         assert LANGUAGE_ALIASES == expected
 

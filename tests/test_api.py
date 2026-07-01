@@ -157,17 +157,17 @@ class TestClassifySingle:
         assert alias.status_code == canonical.status_code == 200
         assert alias.json() == canonical.json()
 
-    def test_lang_ku_alias_only_for_ckb(self, test_client):
-        """lang=ku (alias for ckb) is accepted on the ckb dialect, 422 elsewhere."""
+    def test_lang_ku_alias_only_for_safa_dialects(self, test_client):
+        """lang=ku (alias for ckb) is accepted on the SAFA dialects (acm, ckb), 422 on arz."""
         dialect = os.environ.get("DIALECT", "arz")
         resp = test_client.post("/classify?lang=ku", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == (200 if dialect == "ckb" else 422)
+        assert resp.status_code == (200 if dialect in ("acm", "ckb") else 422)
 
-    def test_lang_ckb_on_non_ckb_returns_422(self, test_client):
-        """lang=ckb on non-Kurdish dialect returns 422."""
+    def test_lang_ckb_on_arz_returns_422(self, test_client):
+        """lang=ckb returns 422 on arz, the only dialect without Kurdish labels."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect == "ckb":
-            pytest.skip("This test only applies to non-ckb dialects")
+        if dialect != "arz":
+            pytest.skip("This test only applies to arz (acm and ckb serve Kurdish labels)")
         resp = test_client.post("/classify?lang=ckb", json={"text": "مرحبا بالعالم"})
         assert resp.status_code == 422
 
@@ -299,11 +299,11 @@ class TestClassifyBatch:
         )
         assert resp.status_code == 200
 
-    def test_batch_lang_ckb_on_non_ckb_returns_422(self, test_client):
-        """lang=ckb on non-Kurdish dialect returns 422 for batch."""
+    def test_batch_lang_ckb_on_arz_returns_422(self, test_client):
+        """lang=ckb returns 422 on arz (no Kurdish labels) for batch."""
         dialect = os.environ.get("DIALECT", "arz")
-        if dialect == "ckb":
-            pytest.skip("This test only applies to non-ckb dialects")
+        if dialect != "arz":
+            pytest.skip("This test only applies to arz (acm and ckb serve Kurdish labels)")
         resp = test_client.post(
             "/classify/batch?lang=ckb",
             json={"texts": ["مرحبا بالعالم"]},
@@ -457,16 +457,16 @@ class TestHttpBehavior:
 #
 # Locks the full, per-dialect behaviour of the `lang` query parameter so it
 # cannot silently regress: BOTH the canonical ISO 639-3 code (ara/eng, plus ckb
-# for the Kurdish dialect) AND its two-letter alias (ar/en/ku) must be accepted;
-# `lang=ckb` is accepted only on the ckb dialect (422 elsewhere); an unknown code
-# is rejected. This is the matrix verified empirically during the ONNX migration:
-# canonical keys were already accepted (no code change was needed), and these
-# tests keep it that way. Runs against both /classify and /classify/batch.
+# for the SAFA dialects acm and ckb) AND its two-letter alias (ar/en/ku) must be
+# accepted; `lang=ckb` is accepted on acm and ckb (422 on arz, which has no Kurdish
+# labels); an unknown code is rejected. The SAFA taxonomy is shared by Iraqi and
+# Kurdish, so both carry the Kurdish label set. Runs against /classify and
+# /classify/batch.
 
 # dialect -> (canonical codes accepted, aliases accepted)
 _LANG_MATRIX = {
     "arz": (("ara", "eng"), ("ar", "en")),
-    "acm": (("ara", "eng"), ("ar", "en")),
+    "acm": (("ara", "eng", "ckb"), ("ar", "en", "ku")),
     "ckb": (("ara", "eng", "ckb"), ("ar", "en", "ku")),
 }
 
@@ -512,8 +512,8 @@ class TestLangAcceptanceMatrix:
             assert resp.status_code == 200, f"alias lang={code} should be 200 (batch)"
 
     def test_lang_ckb_gated_by_dialect(self, test_client):
-        """lang=ckb is 200 on the ckb dialect and 422 on every other dialect."""
-        expected = 200 if _current_dialect() == "ckb" else 422
+        """lang=ckb is 200 on the SAFA dialects (acm, ckb) and 422 on arz."""
+        expected = 200 if _current_dialect() in ("acm", "ckb") else 422
         resp = test_client.post("/classify?lang=ckb", json=_BODY_SINGLE)
         assert resp.status_code == expected
 
