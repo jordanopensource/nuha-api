@@ -45,8 +45,7 @@ def _parse_bounded_int(name: str, default: int, lo: int, hi: int) -> int:
     except ValueError:
         raise RuntimeError(f"{name} must be an integer, got {raw!r}") from None
     if value < lo or value > hi:
-        raise RuntimeError(
-            f"{name} must be between {lo} and {hi}, got {value}")
+        raise RuntimeError(f"{name} must be between {lo} and {hi}, got {value}")
     return value
 
 
@@ -62,8 +61,7 @@ logger = logging.getLogger(__name__)
 class ClassifyRequest(BaseModel):
     """Request body for single text classification."""
 
-    text: Annotated[str, Field(
-        min_length=1, max_length=50000, description="Text to classify")]
+    text: Annotated[str, Field(min_length=1, max_length=50000, description="Text to classify")]
 
     model_config = {
         "json_schema_extra": {
@@ -77,12 +75,9 @@ class ClassifyRequest(BaseModel):
 class ClassifyResponse(BaseModel):
     """Response for single text classification."""
 
-    is_valid: bool = Field(
-        description="Whether the input text was valid for classification")
-    sub_class: str | None = Field(
-        description="Classification sub_class (null if invalid)")
-    main_class: str | None = Field(
-        description="Classification main_class (null if invalid)")
+    is_valid: bool = Field(description="Whether the input text was valid for classification")
+    sub_class: str | None = Field(description="Classification sub_class (null if invalid)")
+    main_class: str | None = Field(description="Classification main_class (null if invalid)")
     confidence: float | None = Field(
         ge=0.0, le=1.0, description="Confidence score 0-1 (null if invalid)"
     )
@@ -131,8 +126,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str
-    cache: CacheStats | None = Field(
-        default=None, description="Inference cache statistics")
+    cache: CacheStats | None = Field(default=None, description="Inference cache statistics")
 
 
 class ErrorResponse(BaseModel):
@@ -183,8 +177,7 @@ _DIALECT_PARAM_DESC = (
 
 def _lang_forms(code: str) -> str:
     """Render a language as its canonical code plus aliases, e.g. "'ara'/'ar' (Arabic)"."""
-    codes = [
-        code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
+    codes = [code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
     return "/".join(f"'{c}'" for c in codes) + f" ({LANGUAGE_NAMES[code]})"
 
 
@@ -192,14 +185,12 @@ _LANG_PARAM_DESC = (
     "Response language (controls label language, not which model runs). "
     "Accepts the canonical ISO 639-3 code or a two-letter alias. "
     "Supported by this dialect: "
-    + ", ".join(_lang_forms(code)
-                for code in LANGUAGE_NAMES if code in SUPPORTED_LANGUAGES)
+    + ", ".join(_lang_forms(code) for code in LANGUAGE_NAMES if code in SUPPORTED_LANGUAGES)
     + "."
 )
 # Every code accepted for this dialect (canonical plus aliases), for error messages.
 _ACCEPTED_LANGS = sorted(
-    set(SUPPORTED_LANGUAGES) | {
-        a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
+    set(SUPPORTED_LANGUAGES) | {a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
 )
 
 app = FastAPI(
@@ -300,8 +291,7 @@ async def health_check() -> HealthResponse:
 async def classify_single(
     request: Annotated[ClassifyRequest, Body()],
     lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
-    dialect: Annotated[str | None, Query(
-        description=_DIALECT_PARAM_DESC)] = None,
+    dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
 ) -> ClassifyResponse:
     """
     Classify a single text.
@@ -327,8 +317,7 @@ async def classify_single(
 async def classify_batch(
     request: Annotated[BatchClassifyRequest, Body()],
     lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
-    dialect: Annotated[str | None, Query(
-        description=_DIALECT_PARAM_DESC)] = None,
+    dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
 ) -> BatchClassifyResponse:
     """
     Classify multiple texts in a single request.
