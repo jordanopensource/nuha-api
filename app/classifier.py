@@ -426,8 +426,7 @@ class LoadedModel:
 class DialectConfig:
     name: str  # human-readable, for logs
     model_path: str  # resolved from env var
-    # text -> cleaned text (or "" if invalid)
-    preprocess_fn: Callable[[str], str]
+    preprocess_fn: Callable[[str], str]  # text -> cleaned text (or "" if invalid)
     sub_to_main: dict[int, int]  # sub_id -> main_id
     sub_labels: dict[str, dict[int, str]]  # lang -> {sub_id: label}
     main_labels: dict[str, dict[int, str]]  # lang -> {main_id: label}
