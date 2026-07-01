@@ -65,7 +65,8 @@ _DIALECTS_CONFIG = _load_dialects_config()
 
 VALID_DIALECTS: frozenset[str] = frozenset(_DIALECTS_CONFIG)
 # code -> human-readable dialect name, for logs and API documentation
-DIALECT_NAMES: dict[str, str] = {code: cfg["name"] for code, cfg in _DIALECTS_CONFIG.items()}
+DIALECT_NAMES: dict[str, str] = {code: cfg["name"]
+                                 for code, cfg in _DIALECTS_CONFIG.items()}
 
 # -----------------------------------------------------------------------------
 # Configuration from environment variables
@@ -89,7 +90,8 @@ def _parse_bounded_int(name: str, default: int, lo: int, hi: int) -> int:
     except ValueError:
         raise RuntimeError(f"{name} must be an integer, got {raw!r}") from None
     if value < lo or value > hi:
-        raise RuntimeError(f"{name} must be between {lo} and {hi}, got {value}")
+        raise RuntimeError(
+            f"{name} must be between {lo} and {hi}, got {value}")
     return value
 
 
@@ -125,9 +127,11 @@ INFERENCE_QUEUE_SIZE = _parse_bounded_int("INFERENCE_QUEUE_SIZE", 32, 0, 10000)
 # Max seconds a request waits for a slot before shedding 503. Part of the request
 # latency budget: nginx proxy_read_timeout must stay above
 # INFERENCE_QUEUE_TIMEOUT + INFERENCE_TIMEOUT so the app owns its own 503/504.
-INFERENCE_QUEUE_TIMEOUT = _parse_bounded_int("INFERENCE_QUEUE_TIMEOUT", 30, 1, 600)
+INFERENCE_QUEUE_TIMEOUT = _parse_bounded_int(
+    "INFERENCE_QUEUE_TIMEOUT", 30, 1, 600)
 
-_VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+_VALID_LOG_LEVELS = frozenset(
+    {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 _raw_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 if _raw_log_level not in _VALID_LOG_LEVELS:
     logging.getLogger(__name__).warning(
@@ -169,7 +173,8 @@ def _setup_logging() -> None:
     else:
         handler = logging.StreamHandler()
         handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
 
     root = logging.getLogger()
@@ -217,7 +222,8 @@ class _InferenceGate:
     inference-timeout path.
     """
 
-    __slots__ = ("_in_flight", "_limit", "_max_in_flight", "_slots", "_wait_timeout")
+    __slots__ = ("_in_flight", "_limit", "_max_in_flight",
+                 "_slots", "_wait_timeout")
 
     def __init__(self, limit: int, queue_size: int, wait_timeout: int) -> None:
         self._limit = limit
@@ -346,7 +352,8 @@ def get_cache_stats() -> dict:
 _ACTIVE_LANGUAGES: dict[str, dict] = _DIALECTS_CONFIG[DIALECT]["languages"]
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(_ACTIVE_LANGUAGES)
 # canonical code -> display name
-LANGUAGE_NAMES: dict[str, str] = {code: meta["name"] for code, meta in _ACTIVE_LANGUAGES.items()}
+LANGUAGE_NAMES: dict[str, str] = {code: meta["name"]
+                                  for code, meta in _ACTIVE_LANGUAGES.items()}
 # alias code -> canonical code (e.g. "ar" -> "ara")
 LANGUAGE_ALIASES: dict[str, str] = {
     alias: code for code, meta in _ACTIVE_LANGUAGES.items() for alias in meta.get("aliases", [])
@@ -438,7 +445,8 @@ class DialectConfig:
 # -----------------------------------------------------------------------------
 
 # Used by Iraqi and Kurdish preprocessing
-ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+ARABIC_SCRIPT_RE = re.compile(
+    r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
 
 # Iraqi-specific leetspeak substitution map
 _LEETSPEAK_MAP = {
@@ -483,7 +491,8 @@ def _preprocess_safa(text: str, *, leetspeak: bool = False, alef_maqsura: bool =
     text = re.sub(r"http\S+|www\S+", "", text)
     text = re.sub(r"@\w+", "", text)
     text = re.sub(r"#(\w+)", r"\1", text)
-    text = re.sub(r"\[\[photo\]\]|photo scraps?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\[\[photo\]\]|photo scraps?",
+                  "", text, flags=re.IGNORECASE)
     if leetspeak:
         tokens = []
         for token in text.split():
@@ -501,7 +510,8 @@ def _preprocess_safa(text: str, *, leetspeak: bool = False, alef_maqsura: bool =
     if alef_maqsura:
         text = re.sub(r"ى", "ي", text)
     text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-    text = re.sub(r"[^\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFFa-zA-Z_\s]", "", text)
+    text = re.sub(
+        r"[^\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFFa-zA-Z_\s]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if not ARABIC_SCRIPT_RE.search(text) or len(text.strip()) < 2:
         return ""
@@ -620,12 +630,14 @@ def load_model() -> LoadedModel:
             with open(config_path, encoding="utf-8") as f:
                 max_length = json.load(f).get("max_length", 128)
         except json.JSONDecodeError:
-            logger.warning("Could not parse %s; using max_length=128", config_path)
+            logger.warning(
+                "Could not parse %s; using max_length=128", config_path)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(ACTIVE_CONFIG.model_path)
     except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(ACTIVE_CONFIG.model_path, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(
+            ACTIVE_CONFIG.model_path, use_fast=False)
 
     onnx_path = _find_onnx_file(path)
 
@@ -697,7 +709,8 @@ def _build_onnx_inputs(loaded: LoadedModel, tokenized: dict) -> dict[str, np.nda
             feed[name] = np.asarray(tokenized[name], dtype=np.int64)
     if "token_type_ids" in loaded.input_names:
         if "token_type_ids" in tokenized:
-            feed["token_type_ids"] = np.asarray(tokenized["token_type_ids"], dtype=np.int64)
+            feed["token_type_ids"] = np.asarray(
+                tokenized["token_type_ids"], dtype=np.int64)
         elif "input_ids" in feed:
             # Single-sequence inputs are all segment 0; the tokenizer just didn't
             # emit the column. Fill it so the required graph input is present.
@@ -757,7 +770,8 @@ def _predict_single(
         sub_class = sub_labels[predicted_id]
         main_class = main_labels[cfg.sub_to_main[predicted_id]]
     except KeyError:
-        logger.error("Model predicted unknown class ID %d for dialect '%s'", predicted_id, cfg.name)
+        logger.error(
+            "Model predicted unknown class ID %d for dialect '%s'", predicted_id, cfg.name)
         return ClassificationResult(
             is_valid=False, sub_class=None, main_class=None, confidence=None
         )
@@ -784,7 +798,8 @@ def _predict_batch(
     valid_indices = [i for i, c in enumerate(cleaned) if c]
 
     results: list[ClassificationResult] = [
-        ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
+        ClassificationResult(is_valid=False, sub_class=None,
+                             main_class=None, confidence=None)
         for _ in texts
     ]
 
@@ -843,7 +858,8 @@ def _predict_batch(
                 confidence=round(conf, 4),
             )
         except KeyError:
-            logger.error("Model predicted unknown class ID %d for dialect '%s'", pred_id, cfg.name)
+            logger.error(
+                "Model predicted unknown class ID %d for dialect '%s'", pred_id, cfg.name)
 
     return results
 
@@ -853,7 +869,8 @@ def _predict_batch(
 # -----------------------------------------------------------------------------
 
 
-_inference_gate = _InferenceGate(CLASSIFIER_WORKERS, INFERENCE_QUEUE_SIZE, INFERENCE_QUEUE_TIMEOUT)
+_inference_gate = _InferenceGate(
+    CLASSIFIER_WORKERS, INFERENCE_QUEUE_SIZE, INFERENCE_QUEUE_TIMEOUT)
 
 
 async def _run_gated(fn: Callable, *args):
@@ -887,7 +904,8 @@ async def _run_gated(fn: Callable, *args):
         await _inference_gate.acquire_slot()
     except TimeoutError:
         _inference_gate.drop_admission()
-        raise ServiceOverloadedError("Timed out waiting for an inference slot") from None
+        raise ServiceOverloadedError(
+            "Timed out waiting for an inference slot") from None
     except BaseException:
         # e.g. the request was cancelled (client disconnect) while queued.
         _inference_gate.drop_admission()
