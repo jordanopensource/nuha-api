@@ -4,6 +4,7 @@
 
 # CI/CD
 .woodpecker/
+woodpecker-templates/
 
 # Python
 __pycache__/
@@ -55,5 +56,12 @@ compose.yaml
 .yamllint
 LICENSE
 
-# Local model directory (model is downloaded fresh during build)
+# Nginx config (mounted by proxy container, not needed in app image)
+nginx.conf
+
+# Development tooling (not needed in container)
+scripts/
+
+# Local model directories (models are downloaded fresh during build)
 model/
+models/
