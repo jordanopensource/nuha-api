@@ -47,7 +47,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     environment:
-      # Dialect used for no-dialect requests (backward compat) and docs routing.
+      # Dialect whose backend the proxy routes the docs pages to.
       # Filled into the generated routing config at container start by nginx's
       # built-in envsubst; NGINX_ENVSUBST_FILTER limits substitution to this one
       # var so nginx's own $variables are left intact.

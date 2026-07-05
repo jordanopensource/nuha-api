@@ -9,12 +9,12 @@ writes two committed, reviewable artifacts:
                              mem_limit and baseline replicas from that dialect's
                              file, plus the proxy depends_on. Rendered from
                              compose.template.yml.
-  - nginx/dialects.conf.template  routing map (?dialect= -> backend), docs
-                             backend, and the invalid-dialect message. The proxy
-                             renders it to /etc/nginx/conf.d/dialects.conf at
-                             startup via nginx's built-in envsubst, filling
-                             ${DEFAULT_DIALECT} (a runtime env) for the
-                             no-dialect fallback and docs routing.
+  - nginx/dialects.conf.template  routing map (/<dialect>/classify path segment
+                             -> backend), the default backend, and the
+                             invalid-dialect message. The proxy renders it to
+                             /etc/nginx/conf.d/dialects.conf at startup via
+                             nginx's built-in envsubst, filling ${DEFAULT_DIALECT}
+                             (a runtime env) for docs routing.
   - .woodpecker/build-{latest,stable}-image.yaml  the per-dialect build steps and
                              the notify depends_on lists, rendered from the
                              hand-edited woodpecker-templates/{latest,stable}.yaml
@@ -226,12 +226,12 @@ def load_dialects() -> dict[str, dict]:
 
 
 def _default_dialect(codes: list[str]) -> str:
-    """The dialect used for no-dialect requests and docs routing.
+    """The dialect whose backend the proxy routes the docs pages to.
 
     Prefer 'arz' (the historical default) when it exists, else the first dialect
-    code alphabetically. Derived from the dialect files, not hardcoded, so the
-    fallback stays valid even if 'arz' is removed or was never present -- an
-    operator can still override it at runtime via the DEFAULT_DIALECT env.
+    code alphabetically. Derived from the dialect files, not hardcoded, so it
+    stays valid even if 'arz' is removed or was never present -- an operator can
+    still override it at runtime via the DEFAULT_DIALECT env.
     """
     return "arz" if "arz" in codes else sorted(codes)[0]
 
@@ -321,17 +321,22 @@ def render_nginx(dialects: dict[str, dict]) -> str:
         "# Rendered to /etc/nginx/conf.d/dialects.conf at container start; nginx",
         "# envsubst fills the default-dialect placeholder below (NGINX_ENVSUBST_FILTER",
         "# limits substitution to that one variable, leaving nginx $vars intact).",
-        "# Maps ?dialect= to the matching backend; unknown -> empty -> 400.",
-        "map $arg_dialect $dialect_backend {",
-        '    ""      nuha-api-${DEFAULT_DIALECT}:8000;',
+        "# Maps the dialect PATH segment (the <dialect> in /<dialect>/classify",
+        "# [/batch]) captured by the proxy as $dia to the matching backend. No",
+        "# empty-key fallback: the path form always names a dialect, so an unknown",
+        "# one -> '' -> 400 (the location returns 460 -> @invalid_dialect).",
+        "map $dia $path_backend {",
     ]
     for code in codes:
         lines.append(f"    {code:<7} nuha-api-{code}:8000;")
     lines += [
         '    default "";',
         "}",
-        "# Docs are dialect-independent, served from the default dialect's backend.",
-        "map $host $docs_backend { default nuha-api-${DEFAULT_DIALECT}:8000; }",
+        "# The default backend serves the dialect-independent docs. It is a",
+        "# constant, but written as a map so proxy_pass stays a $variable -> per-",
+        "# request Docker DNS resolution and replica round-robin, like the path",
+        "# backends above.",
+        "map $host $default_backend { default nuha-api-${DEFAULT_DIALECT}:8000; }",
         f'map $host $invalid_dialect_msg {{ default "Invalid dialect. '
         f'Must be one of: {human_list}."; }}',
         "",
