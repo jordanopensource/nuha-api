@@ -346,7 +346,7 @@ def get_cache_stats() -> dict:
 
 _ACTIVE_LANGUAGES: dict[str, dict] = _DIALECTS_CONFIG[DIALECT]["languages"]
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(_ACTIVE_LANGUAGES)
-# Default response language when a request omits ?lang=: the first canonical code
+# Default response language when a request omits lang: the first canonical code
 # alphabetically among those this dialect declares. Derived, not hardcoded, so a
 # dialect that doesn't serve Arabic still has a working default. Startup label
 # validation guarantees every declared language has labels, so this is always

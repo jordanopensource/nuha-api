@@ -10,7 +10,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -147,16 +147,47 @@ class BodySizeLimitMiddleware:
 # Schemas
 # -----------------------------------------------------------------------------
 
+# Language descriptions are built from the dialect config (defined here, before
+# the request models, because the `lang` body field below uses them) so the docs
+# never drift from the configured languages and carry no hardcoded knowledge.
+
+
+def _lang_forms(code: str) -> str:
+    """Render a language as its canonical code plus aliases, e.g. "'ara'/'ar' (Arabic)"."""
+    codes = [code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
+    return "/".join(f"'{c}'" for c in codes) + f" ({LANGUAGE_NAMES[code]})"
+
+
+_LANG_PARAM_DESC = (
+    "Response language (controls label language, not which model runs). "
+    "Accepts the canonical ISO 639-3 code or a two-letter alias. "
+    "Supported by this dialect: "
+    + ", ".join(_lang_forms(code) for code in LANGUAGE_NAMES)
+    + f". Defaults to '{DEFAULT_LANGUAGE}' if omitted."
+)
+# Every code accepted for this dialect (canonical plus aliases), for error messages.
+_ACCEPTED_LANGS = sorted(
+    set(SUPPORTED_LANGUAGES) | {a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
+)
+# `lang` is a short ISO 639 code (2-3 letters); cap the field at the longest code
+# this dialect actually accepts. Coarse bound: it rejects an over-long value as a
+# stripped 422 before _resolve_lang runs, so abuse text in `lang` is never echoed
+# back. Derived from the accepted set, so it can never reject a valid code.
+_MAX_LANG_LEN = max(len(code) for code in _ACCEPTED_LANGS)
+
 
 class ClassifyRequest(BaseModel):
     """Request body for single text classification."""
 
     text: Annotated[str, Field(min_length=1, max_length=50000, description="Text to classify")]
+    lang: Annotated[str, Field(max_length=_MAX_LANG_LEN, description=_LANG_PARAM_DESC)] = (
+        DEFAULT_LANGUAGE
+    )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
-                {"text": "نص للتصنيف"},
+                {"text": "نص للتصنيف", "lang": "ar"},
             ]
         }
     }
@@ -184,11 +215,14 @@ class BatchClassifyRequest(BaseModel):
             description=f"List of texts to classify (max {MAX_BATCH_SIZE})",
         ),
     ]
+    lang: Annotated[str, Field(max_length=_MAX_LANG_LEN, description=_LANG_PARAM_DESC)] = (
+        DEFAULT_LANGUAGE
+    )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
-                {"texts": ["نص للتصنيف 1", "نص للتصنيف 2"]},
+                {"texts": ["نص للتصنيف 1", "نص للتصنيف 2"], "lang": "ar"},
             ]
         }
     }
@@ -273,30 +307,7 @@ _EXPOSE_CACHE_STATS = os.getenv("EXPOSE_CACHE_STATS") is not None
 
 # API parameter descriptions are built from the dialect config so the docs never
 # drift from the configured dialects/languages and carry no hardcoded knowledge.
-_DIALECT_PARAM_DESC = (
-    "Input dialect: "
-    + ", ".join(f"'{code}' ({name})" for code, name in DIALECT_NAMES.items())
-    + ". Defaults to this instance's configured dialect."
-)
-
-
-def _lang_forms(code: str) -> str:
-    """Render a language as its canonical code plus aliases, e.g. "'ara'/'ar' (Arabic)"."""
-    codes = [code, *sorted(a for a, c in LANGUAGE_ALIASES.items() if c == code)]
-    return "/".join(f"'{c}'" for c in codes) + f" ({LANGUAGE_NAMES[code]})"
-
-
-_LANG_PARAM_DESC = (
-    "Response language (controls label language, not which model runs). "
-    "Accepts the canonical ISO 639-3 code or a two-letter alias. "
-    "Supported by this dialect: "
-    + ", ".join(_lang_forms(code) for code in LANGUAGE_NAMES if code in SUPPORTED_LANGUAGES)
-    + "."
-)
-# Every code accepted for this dialect (canonical plus aliases), for error messages.
-_ACCEPTED_LANGS = sorted(
-    set(SUPPORTED_LANGUAGES) | {a for a, c in LANGUAGE_ALIASES.items() if c in SUPPORTED_LANGUAGES}
-)
+# (The lang description lives with the request models above, which reference it.)
 
 app = FastAPI(
     title="Nuha API",
@@ -307,18 +318,8 @@ app = FastAPI(
     redoc_url="/redoc" if _ENABLE_DOCS else None,
     openapi_url="/openapi.json" if _ENABLE_DOCS else None,
     responses={
-        400: {"model": ErrorResponse, "description": "Malformed request body"},
         413: {"model": ErrorResponse, "description": "Request body too large"},
-        422: {
-            "model": ValidationErrorResponse,
-            "description": "Validation error (rejected input is not echoed)",
-        },
         500: {"model": ErrorResponse, "description": "Internal server error"},
-        503: {
-            "model": ErrorResponse,
-            "description": "Service overloaded (all inference workers busy)",
-        },
-        504: {"model": ErrorResponse, "description": "Inference timed out"},
     },
 )
 
@@ -370,19 +371,18 @@ async def generic_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-def _validate_dialect(dialect: str | None) -> None:
-    """Raise 422 if dialect was provided and is invalid or doesn't match this instance."""
-    if dialect is not None:
-        if dialect not in VALID_DIALECTS:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid dialect '{dialect}'. Must be one of: {sorted(VALID_DIALECTS)}",
-            )
-        if dialect != DIALECT:
-            raise HTTPException(
-                status_code=422,
-                detail=f"This instance serves dialect '{DIALECT}', got '{dialect}'",
-            )
+def _validate_dialect(dialect: str) -> None:
+    """Raise 422 if the path dialect is unknown or isn't the one this instance serves."""
+    if dialect not in VALID_DIALECTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid dialect '{dialect}'. Must be one of: {sorted(VALID_DIALECTS)}",
+        )
+    if dialect != DIALECT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"This instance serves dialect '{DIALECT}', got '{dialect}'",
+        )
 
 
 def _resolve_lang(lang: str) -> str:
@@ -421,24 +421,22 @@ async def health_check() -> HealthResponse:
     return HealthResponse(status="healthy", cache=cache)
 
 
-@app.post("/classify", response_model=ClassifyResponse, tags=["Classification"])
-async def classify_single(
-    request: Annotated[ClassifyRequest, Body()],
-    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = DEFAULT_LANGUAGE,
-    dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
-) -> ClassifyResponse:
-    """
-    Classify a single text.
+# The dialect is a path segment (/<dialect>/classify, /<dialect>/classify/batch),
+# which the nginx proxy routes to the matching backend and the backend validates
+# against its own DIALECT. The shared _do_* helpers hold the classification logic
+# so the single and batch endpoints cannot drift.
 
-    Returns the predicted sub_class, main_class, and confidence score.
+_DIALECT_PATH_DESC = (
+    "Dialect to classify with; must match this instance's configured dialect. One of: "
+    + ", ".join(f"'{code}' ({name})" for code, name in DIALECT_NAMES.items())
+    + "."
+)
 
-    The `lang` query parameter controls the language of the returned labels;
-    the languages this dialect supports are listed in the `lang` parameter
-    description. `lang` does not change which model runs.
-    """
-    _validate_dialect(dialect)
-    lang = _resolve_lang(lang)
-    result = await get_classification(request.text, lang=lang)
+
+async def _do_classify(text: str, lang: str) -> ClassifyResponse:
+    """Single-text classification. Dialect is validated by the caller; `lang`
+    controls the label language (not which model runs) and is resolved here."""
+    result = await get_classification(text, lang=_resolve_lang(lang))
     return ClassifyResponse(
         is_valid=result.is_valid,
         sub_class=result.sub_class,
@@ -447,25 +445,10 @@ async def classify_single(
     )
 
 
-@app.post("/classify/batch", response_model=BatchClassifyResponse, tags=["Classification"])
-async def classify_batch(
-    request: Annotated[BatchClassifyRequest, Body()],
-    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = DEFAULT_LANGUAGE,
-    dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
-) -> BatchClassifyResponse:
-    """
-    Classify multiple texts in a single request.
-
-    Returns classification results in the same order as the input texts.
-    More efficient than multiple single requests for large volumes.
-
-    The `lang` query parameter controls the language of the returned labels;
-    the languages this dialect supports are listed in the `lang` parameter
-    description. `lang` does not change which model runs.
-    """
-    _validate_dialect(dialect)
-    lang = _resolve_lang(lang)
-    results = await get_classifications_batch(request.texts, lang=lang)
+async def _do_classify_batch(texts: list[str], lang: str) -> BatchClassifyResponse:
+    """Batch classification. Dialect is validated by the caller; results come
+    back in input order."""
+    results = await get_classifications_batch(texts, lang=_resolve_lang(lang))
     return BatchClassifyResponse(
         results=[
             ClassifyResponse(
@@ -477,3 +460,65 @@ async def classify_batch(
             for r in results
         ]
     )
+
+
+# Errors only the classification endpoints can return: 400 (an over-cap streamed
+# body surfaces as a FastAPI body-parse error, which happens only on routes that
+# read a body), 422 (body/path validation), 503 (the inference gate sheds), 504
+# (inference timed out). Only 413 (Content-Length precheck, before routing) and
+# 500 (the catch-all handler) are truly app-wide, so they stay on the app.
+_CLASSIFY_ERROR_RESPONSES = {
+    400: {"model": ErrorResponse, "description": "Malformed request body"},
+    422: {
+        "model": ValidationErrorResponse,
+        "description": "Validation error (rejected input is not echoed)",
+    },
+    503: {
+        "model": ErrorResponse,
+        "description": "Service overloaded (all inference workers busy)",
+    },
+    504: {"model": ErrorResponse, "description": "Inference timed out"},
+}
+
+
+@app.post(
+    "/{dialect}/classify/batch",
+    response_model=BatchClassifyResponse,
+    responses=_CLASSIFY_ERROR_RESPONSES,
+    tags=["Classification"],
+)
+async def classify_batch(
+    dialect: Annotated[str, Path(description=_DIALECT_PATH_DESC)],
+    request: Annotated[BatchClassifyRequest, Body()],
+) -> BatchClassifyResponse:
+    """
+    Classify multiple texts in a single request.
+
+    Returns classification results in the same order as the input texts. More
+    efficient than multiple single requests for large volumes. The dialect is the
+    path segment and must match this instance; `lang` goes in the body and
+    controls the label language, not which model runs.
+    """
+    _validate_dialect(dialect)
+    return await _do_classify_batch(request.texts, request.lang)
+
+
+@app.post(
+    "/{dialect}/classify",
+    response_model=ClassifyResponse,
+    responses=_CLASSIFY_ERROR_RESPONSES,
+    tags=["Classification"],
+)
+async def classify_single(
+    dialect: Annotated[str, Path(description=_DIALECT_PATH_DESC)],
+    request: Annotated[ClassifyRequest, Body()],
+) -> ClassifyResponse:
+    """
+    Classify a single text.
+
+    Returns the predicted sub_class, main_class, and confidence score. The dialect
+    is the path segment and must match this instance; `lang` goes in the body and
+    controls the label language, not which model runs.
+    """
+    _validate_dialect(dialect)
+    return await _do_classify(request.text, request.lang)
