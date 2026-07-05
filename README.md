@@ -349,7 +349,6 @@ Anything dialect-specific (memory limit, replica count) is in
 | `DISABLE_DOCS`       | *(set in `.env`)*      | If set, turns off `/docs`, `/redoc`, and `/openapi.json`. The shipped `.env` sets it; remove the line to serve docs. |
 | `LOG_LEVEL`          | `INFO`                 | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.                           |
 | `LOG_FORMAT`         | `text`                 | `text` for humans, `json` for log aggregation.                               |
-| `HOST`               | `0.0.0.0`              | Bind address.                                                                 |
 | `PORT`               | `8000`                 | Port the proxy publishes.                                                     |
 | `TIMEOUT`            | `120`                  | Uvicorn keep-alive timeout in seconds. Not a request timeout.                 |
 

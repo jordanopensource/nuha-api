@@ -372,7 +372,7 @@ def _wp_build_step(channel: str, code: str) -> str:
     # single "*" arg, so the build args (DIALECT included) never get set.
     return (
         f"  - name: build-{channel}-image-{code}\n"
-        f"    image: woodpeckerci/plugin-docker-buildx\n"
+        f"    image: woodpeckerci/plugin-docker-buildx:6.1.0\n"
         f"    settings:\n"
         f"      repo: *docker_repo\n"
         f"      registry: *registry_url\n"
@@ -390,7 +390,8 @@ def _wp_build_step(channel: str, code: str) -> str:
         f"        CI_PIPELINE_CREATED: ${{CI_PIPELINE_CREATED}}\n"
         f"    depends_on:\n"
         f"      - run-pre-commit-hooks\n"
-        f"      - check-lockfile"
+        f"      - check-lockfile\n"
+        f"      - run-tests"
     )
 
 
