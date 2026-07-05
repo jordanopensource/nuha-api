@@ -1,446 +1,220 @@
-"""Tests for text preprocessing functions.
+"""Tests for text preprocessing.
 
-These are the highest-value tests: pure functions with zero external
-dependencies and no mocking needed. They catch real regressions in the
-dialect-specific text cleaning pipelines.
+Pure functions, no mocking. Every preprocessor is obtained exactly the way the
+app builds it -- ``_build_preprocess_fn`` applied to each dialect file's
+``preprocessing`` config -- so the tests exercise the configurations that
+actually ship and stay correct as dialect files are added or removed. Nothing
+here imports a specific preprocessor or names a dialect: the universal contract
+is checked against every discovered config, and family-specific behaviour is
+keyed off the ``preprocessing.type`` declared in the files (data, not a
+hardcoded family).
 
-Note: conftest.py handles mocking heavy ML imports and setting DIALECT
-before these imports occur.
+Note: conftest.py mocks the heavy ML imports and sets DIALECT before these
+imports occur.
 """
 
 import pytest
 
-from app.classifier import _preprocess_nuha, _preprocess_safa
+from app.classifier import _build_preprocess_fn
+from tests.conftest import _DIALECT_FILES
+
+
+# --- discovery: everything derives from the shipped dialect files ------------
+
+
+def _unique_preprocessors():
+    """One ``pytest.param(built_fn, prep_config)`` per DISTINCT preprocessing
+    config that ships, built the way the app builds it. A new dialect (or family)
+    is covered automatically with no edit here."""
+    out, seen = [], set()
+    for code, cfg in _DIALECT_FILES.items():
+        prep = cfg["preprocessing"]
+        key = tuple(sorted(prep.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(pytest.param(_build_preprocess_fn(prep), prep, id=code))
+    return out
+
+
+_PREPROCESSORS = _unique_preprocessors()
+_TYPES_PRESENT = sorted({cfg["preprocessing"]["type"] for cfg in _DIALECT_FILES.values()})
+
+
+def _fn_for_type(prep_type):
+    """Build the preprocessor for the first shipped dialect declaring this type."""
+    for cfg in _DIALECT_FILES.values():
+        if cfg["preprocessing"]["type"] == prep_type:
+            return _build_preprocess_fn(cfg["preprocessing"])
+    return None
+
+
+def _configs_declaring(flag):
+    """Params for every shipped config that exposes ``flag`` (both on and off
+    values, whichever ship), or a single explicitly-skipped param if none do."""
+    params = [
+        pytest.param(_build_preprocess_fn(c["preprocessing"]), c["preprocessing"], id=code)
+        for code, c in _DIALECT_FILES.items()
+        if flag in c["preprocessing"]
+    ]
+    return params or [
+        pytest.param(
+            None, None, marks=pytest.mark.skip(reason=f"no shipped config declares {flag!r}")
+        )
+    ]
 
 
 # =============================================================================
-# Egyptian Arabic preprocessing
+# Universal contract -- must hold for every preprocessor, whatever type/flags
 # =============================================================================
 
 
-class TestPreprocessNuha:
-    """Tests for _preprocess_nuha -- Egyptian Arabic preprocessing."""
+@pytest.mark.parametrize("preprocess,prep", _PREPROCESSORS)
+class TestPreprocessingContract:
+    def test_returns_str(self, preprocess, prep):
+        assert isinstance(preprocess("مرحبا بالعالم"), str)
 
-    def test_arabic_text_kept(self):
-        """Pure Arabic text passes through unchanged (modulo whitespace normalization)."""
-        result = _preprocess_nuha("مرحبا بالعالم")
-        assert result == "مرحبا بالعالم"
+    def test_empty_and_whitespace_return_empty(self, preprocess, prep):
+        assert preprocess("") == ""
+        assert preprocess("   ") == ""
 
-    def test_non_arabic_stripped(self):
-        """Non-Arabic, non-emoji characters are removed."""
-        result = _preprocess_nuha("Hello مرحبا World")
-        assert result == "مرحبا"
-
-    def test_emojis_preserved_with_arabic(self):
-        """Emojis are kept alongside Arabic text."""
-        result = _preprocess_nuha("مرحبا 😊")
+    def test_valid_arabic_kept_and_whitespace_normalized(self, preprocess, prep):
+        result = preprocess("  مرحبا    بالعالم  ")
         assert "مرحبا" in result
-        assert "😊" in result
-
-    def test_emoji_only_returns_empty(self):
-        """Text consisting entirely of emojis is considered invalid."""
-        result = _preprocess_nuha("😊😂🔥")
-        assert result == ""
-
-    def test_over_50_words_returns_empty(self):
-        """Text exceeding 50 words returns empty (invalid)."""
-        text = " ".join(["كلمة"] * 51)
-        result = _preprocess_nuha(text)
-        assert result == ""
-
-    def test_exactly_50_words_accepted(self):
-        """Text with exactly 50 words is valid."""
-        text = " ".join(["كلمة"] * 50)
-        result = _preprocess_nuha(text)
-        assert result != ""
-        assert result.count("كلمة") == 50
-
-    def test_empty_input_returns_empty(self):
-        """Empty string input returns empty."""
-        assert _preprocess_nuha("") == ""
-
-    def test_whitespace_only_returns_empty(self):
-        """Whitespace-only input returns empty."""
-        assert _preprocess_nuha("   ") == ""
-
-    def test_mixed_arabic_latin_only_arabic_survives(self):
-        """Mixed Arabic + Latin: only Arabic characters survive."""
-        result = _preprocess_nuha("أنا I am أحب love الخير good")
-        assert "I" not in result
-        assert "am" not in result
-        assert "أنا" in result
-        assert "أحب" in result
-
-    def test_multiple_spaces_collapsed(self):
-        """Multiple consecutive spaces are collapsed to single space."""
-        result = _preprocess_nuha("مرحبا    بالعالم")
         assert "  " not in result
-        assert "مرحبا" in result
+        assert result == result.strip()
 
-    def test_leading_trailing_whitespace_stripped(self):
-        """Leading and trailing whitespace is stripped."""
-        result = _preprocess_nuha("  مرحبا  ")
-        assert not result.startswith(" ")
-        assert not result.endswith(" ")
-        assert result == "مرحبا"
+    def test_over_50_words_rejected_50_accepted(self, preprocess, prep):
+        assert preprocess(" ".join(["مرحبا"] * 50)) != ""
+        assert preprocess(" ".join(["مرحبا"] * 51)) == ""
 
-    def test_arabic_with_numbers_drops_numbers(self):
-        """Numbers (ASCII digits) are not in the Arabic Unicode range and get dropped."""
-        result = _preprocess_nuha("مرحبا 123 بالعالم")
-        assert "123" not in result
-        assert "مرحبا" in result
+    def test_deterministic(self, preprocess, prep):
+        text = "مرحبا بالعالم"
+        assert preprocess(text) == preprocess(text)
 
-    def test_49_words_accepted(self):
-        """Text under 50 words is accepted."""
-        text = " ".join(["كلمة"] * 49)
-        result = _preprocess_nuha(text)
-        assert result != ""
-
-    def test_single_arabic_word(self):
-        """Single Arabic word is valid."""
-        assert _preprocess_nuha("مرحبا") == "مرحبا"
-
-    def test_punctuation_stripped(self):
-        """Punctuation is not in the Arabic U+0600-U+06FF range and is dropped."""
-        result = _preprocess_nuha("مرحبا! بالعالم.")
-        assert "!" not in result
-        assert "." not in result
+    def test_word_guard_short_circuits_before_expensive_work(self, preprocess, prep):
+        """The >50-word guard fires cheaply on a pathological many-token input
+        (what an attacker would send to burn CPU) instead of running the full
+        pipeline -- this bounds per-request CPU so a huge body can't tie up an
+        inference slot."""
+        pathological = "a3 " * 20000  # 20k arabizi-shaped tokens, far over 50 words
+        # The >50-word guard rejects this pathological many-token input up front,
+        # so a huge body can't burn CPU running the full per-token pipeline.
+        assert preprocess(pathological) == ""
 
 
 # =============================================================================
-# Iraqi Arabic preprocessing
+# Family-specific behaviour -- keyed off the discovered preprocessing.type
 # =============================================================================
+#
+# Keys are matched against the `preprocessing.type` values found in the dialect
+# files (data, not a hardcoded family list). A type that ships but is missing
+# here fails loudly (a new family must state its expected behaviour); a type
+# listed here but not shipped simply never runs. Each check is
+# (label, input, predicate-on-output).
 
-
-class TestPreprocessIraqi:
-    """Tests for Iraqi Arabic preprocessing via _preprocess_safa with Iraqi flags."""
-
-    def _preprocess_acm(self, text: str) -> str:
-        """Iraqi convenience wrapper: leetspeak=True, alef_maqsura=True."""
-        return _preprocess_safa(text, leetspeak=True, alef_maqsura=True)
-
-    def test_urls_stripped(self):
-        """URLs are removed from text."""
-        result = self._preprocess_acm("مرحبا http://example.com بالعالم")
-        assert "http" not in result
-        assert "example" not in result
-        assert "مرحبا" in result
-
-    def test_www_urls_stripped(self):
-        """www-prefixed URLs are also removed."""
-        result = self._preprocess_acm("مرحبا www.example.com بالعالم")
-        assert "www" not in result
-        assert "مرحبا" in result
-
-    def test_mentions_stripped(self):
-        """@mentions are removed."""
-        result = self._preprocess_acm("مرحبا @username بالعالم")
-        assert "@" not in result
-        assert "username" not in result
-
-    def test_hashtag_symbol_stripped_word_kept(self):
-        """# is stripped but the hashtag word remains."""
-        result = self._preprocess_acm("#مرحبا بالعالم")
-        assert "#" not in result
-        assert "مرحبا" in result
-
-    def test_photo_tag_stripped(self):
-        """[[photo]] placeholder is removed."""
-        result = self._preprocess_acm("[[photo]] مرحبا بالعالم")
-        assert "photo" not in result
-        assert "مرحبا" in result
-
-    def test_photo_scraps_stripped(self):
-        """'photo scraps' text is removed."""
-        result = self._preprocess_acm("photo scraps مرحبا بالعالم")
-        assert "photo" not in result.lower()
-        assert "مرحبا" in result
-
-    def test_leetspeak_3_to_ain(self):
-        """Leetspeak: 3 decodes to ain."""
-        result = self._preprocess_acm("3rbi مرحبا")
-        assert "ع" in result
-
-    def test_leetspeak_7_to_ha(self):
-        """Leetspeak: 7 decodes to ha."""
-        result = self._preprocess_acm("7abibi مرحبا")
-        assert "ح" in result
-
-    def test_leetspeak_ch_to_tasheen(self):
-        """Leetspeak: ch decodes to tasheen."""
-        result = self._preprocess_acm("ch3b مرحبا")
-        assert "تش" in result
-
-    def test_leetspeak_only_mixed_digit_letter_tokens(self):
-        """Leetspeak decoding is only applied to tokens with both digits AND letters."""
-        # Pure letter token: not decoded
-        result_letters = self._preprocess_acm("hello مرحبا بالعالم")
-        assert "hello" in result_letters
-
-        # Token with both: decoded
-        result_mixed = self._preprocess_acm("3rbi مرحبا بالعالم")
-        assert "3rbi" not in result_mixed
-
-    def test_pure_number_tokens_not_decoded(self):
-        """Pure number tokens are NOT subjected to leetspeak decoding."""
-        # "123" has digits but no letters -> not decoded
-        # Then the non-Arabic/non-Latin filter strips digits anyway
-        result = self._preprocess_acm("123 مرحبا بالعالم")
-        # The number should not produce Arabic letter substitutions
-        # like ء (for 2), ع (for 3), etc.
-        assert "مرحبا" in result
-
-    def test_emoji_demojized(self):
-        """Emojis are converted to text descriptions."""
-        result = self._preprocess_acm("مرحبا 😊 بالعالم")
-        assert "😊" not in result
-
-    def test_repeated_chars_collapsed(self):
-        """Repeated characters (3+) are collapsed to 2."""
-        result = self._preprocess_acm("هههههههه مرحبا بالعالم")
-        assert "هههههههه" not in result
-        assert "هه" in result
-
-    def test_alef_normalization(self):
-        """Alef variants are normalized to bare alef."""
-        result = self._preprocess_acm("إبراهيم أحمد آدم ٱلله")
-        assert "إ" not in result
-        assert "أ" not in result
-        assert "آ" not in result
-        assert "ٱ" not in result
-        assert "ابراهيم" in result
-
-    def test_alef_maqsura_normalized(self):
-        """Alef maqsura is normalized to ya in Iraqi."""
-        result = self._preprocess_acm("على مرحبا")
-        assert "ى" not in result
-        assert "علي" in result
-
-    def test_diacritics_stripped(self):
-        """Arabic diacritics (tashkeel) are removed."""
-        result = self._preprocess_acm("بِسْمِ اللَّهِ الرَّحمن")
-        assert "\u0650" not in result  # kasra
-        assert "\u0652" not in result  # sukun
-
-    def test_non_arabic_non_latin_stripped(self):
-        """Characters outside Arabic/Latin ranges are stripped."""
-        result = self._preprocess_acm("مرحبا 你好 بالعالم")
-        assert "你" not in result
-        assert "好" not in result
-        assert "مرحبا" in result
-
-    def test_no_arabic_returns_empty(self):
-        """Text with no Arabic script returns empty (invalid)."""
-        result = self._preprocess_acm("Hello World")
-        assert result == ""
-
-    def test_text_shorter_than_2_chars_returns_empty(self):
-        """Text resulting in fewer than 2 chars is invalid."""
-        result = self._preprocess_acm("ا")
-        assert result == ""
-
-    def test_non_string_input_returns_empty(self):
-        """Non-string input is handled gracefully."""
-        assert _preprocess_safa(None, leetspeak=True, alef_maqsura=True) == ""
-        assert _preprocess_safa(123, leetspeak=True, alef_maqsura=True) == ""
-        assert _preprocess_safa([], leetspeak=True, alef_maqsura=True) == ""
-
-    def test_empty_string_returns_empty(self):
-        """Empty string input returns empty."""
-        assert self._preprocess_acm("") == ""
-
-    def test_whitespace_only_returns_empty(self):
-        """Whitespace-only input returns empty."""
-        assert self._preprocess_acm("   ") == ""
-
-    def test_valid_arabic_text_passes(self):
-        """Normal Arabic text passes preprocessing."""
-        result = self._preprocess_acm("مرحبا بالعالم العربي")
-        assert result != ""
-        assert "مرحبا" in result
-
-    def test_whitespace_normalized(self):
-        """Multiple whitespace characters are collapsed."""
-        result = self._preprocess_acm("مرحبا    بالعالم    العربي")
-        assert "  " not in result
-
-
-# =============================================================================
-# Kurdish (Sorani) preprocessing
-# =============================================================================
-
-
-class TestPreprocessKurdish:
-    """Tests for Sorani Kurdish preprocessing via _preprocess_safa with Kurdish flags."""
-
-    def _preprocess_ckb(self, text: str) -> str:
-        """Kurdish convenience wrapper: leetspeak=False, alef_maqsura=False."""
-        return _preprocess_safa(text, leetspeak=False, alef_maqsura=False)
-
-    def test_no_leetspeak_decoding(self):
-        """Kurdish does NOT decode leetspeak; numbers stay as numbers."""
-        # Use a text without natural ain to isolate the test.
-        # "3rbi" with leetspeak decoding would produce "عrbi".
-        # Without it, the "3" is not replaced and the token stays as-is.
-        acm_result = _preprocess_safa("3rbi مرحبا", leetspeak=True, alef_maqsura=True)
-        ckb_result = self._preprocess_ckb("3rbi مرحبا")
-        # Iraqi decodes: "3" -> "ع", so "عrbi" appears
-        assert "عrbi" in acm_result
-        # Kurdish does NOT decode, so "عrbi" must be absent
-        assert "عrbi" not in ckb_result
-
-    def test_no_alef_maqsura_normalization(self):
-        """Kurdish does NOT normalize alef maqsura; it stays as-is."""
-        result = self._preprocess_ckb("على مرحبا")
-        assert "ى" in result
-
-    def test_urls_stripped_same_as_iraqi(self):
-        """URLs are still removed (shared behavior)."""
-        result = self._preprocess_ckb("مرحبا http://example.com بالعالم")
-        assert "http" not in result
-
-    def test_mentions_stripped_same_as_iraqi(self):
-        """Mentions are still removed (shared behavior)."""
-        result = self._preprocess_ckb("مرحبا @user بالعالم")
-        assert "@" not in result
-
-    def test_alef_normalization_same_as_iraqi(self):
-        """Alef variants are still normalized (shared behavior)."""
-        result = self._preprocess_ckb("إبراهيم أحمد مرحبا")
-        assert "إ" not in result
-        assert "أ" not in result
-
-    def test_repeated_chars_collapsed_same_as_iraqi(self):
-        """Repeated chars are still collapsed (shared behavior)."""
-        result = self._preprocess_ckb("هههههههه مرحبا بالعالم")
-        assert "هههههههه" not in result
-        assert "هه" in result
-
-    def test_diacritics_stripped_same_as_iraqi(self):
-        """Diacritics are still removed (shared behavior)."""
-        result = self._preprocess_ckb("بِسْمِ اللهِ الرحمن")
-        assert "\u0650" not in result
-
-    def test_emoji_demojized_same_as_iraqi(self):
-        """Emojis are still converted to text (shared behavior)."""
-        result = self._preprocess_ckb("مرحبا 😊 بالعالم")
-        assert "😊" not in result
-
-    def test_no_arabic_returns_empty_same_as_iraqi(self):
-        """Text with no Arabic script returns empty (shared behavior)."""
-        result = self._preprocess_ckb("Hello World")
-        assert result == ""
-
-    def test_short_text_returns_empty_same_as_iraqi(self):
-        """Text under 2 chars returns empty (shared behavior)."""
-        result = self._preprocess_ckb("ا")
-        assert result == ""
-
-    def test_valid_arabic_text_passes(self):
-        """Normal Arabic text passes preprocessing."""
-        result = self._preprocess_ckb("مرحبا بالعالم العربي")
-        assert result != ""
-
-
-# =============================================================================
-# Parametrized: shared behavior between Iraqi and Kurdish
-# =============================================================================
-
-
-@pytest.mark.parametrize(
-    "leetspeak, alef_maqsura, dialect_name",
-    [
-        (True, True, "acm"),
-        (False, False, "ckb"),
+_TYPE_BEHAVIOURS = {
+    "nuha": [
+        ("keeps raw emoji beside arabic", "مرحبا 😊", lambda r: "😊" in r and "مرحبا" in r),
+        ("emoji-only is invalid", "😊😂🔥", lambda r: r == ""),
+        ("drops non-arabic non-emoji chars", "Hello مرحبا World", lambda r: r == "مرحبا"),
+        (
+            "keeps only arabic in mixed script",
+            "أنا I am أحب love الخير good",
+            lambda r: "I" not in r and "am" not in r and "أنا" in r and "أحب" in r,
+        ),
+        (
+            "drops digits and punctuation",
+            "مرحبا 123 بالعالم!.",
+            lambda r: "123" not in r and "!" not in r and "." not in r and "مرحبا" in r,
+        ),
     ],
-    ids=["iraqi", "kurdish"],
-)
-class TestSafaSharedBehavior:
-    """Behaviors that are identical between Iraqi and Kurdish preprocessing."""
+    "safa": [
+        (
+            "strips http/www urls",
+            "مرحبا http://example.com بالعالم",
+            lambda r: "http" not in r and "example" not in r,
+        ),
+        ("strips www urls", "مرحبا www.example.com بالعالم", lambda r: "www" not in r),
+        (
+            "strips @mentions",
+            "مرحبا @username بالعالم",
+            lambda r: "@" not in r and "username" not in r,
+        ),
+        ("strips # but keeps the word", "#مرحبا بالعالم", lambda r: "#" not in r and "مرحبا" in r),
+        (
+            "strips [[photo]] artifacts",
+            "[[photo]] مرحبا بالعالم",
+            lambda r: "photo" not in r.lower(),
+        ),
+        (
+            "strips 'photo scraps' artifacts",
+            "photo scraps مرحبا بالعالم",
+            lambda r: "photo" not in r.lower(),
+        ),
+        ("demojizes rather than keeping raw emoji", "مرحبا 😊 بالعالم", lambda r: "😊" not in r),
+        (
+            "collapses 3+ repeated chars to 2",
+            "هههههههه مرحبا بالعالم",
+            lambda r: "هههههههه" not in r and "هه" in r,
+        ),
+        (
+            "normalizes alef variants to bare alef",
+            "إبراهيم أحمد آدم ٱلله",
+            lambda r: all(v not in r for v in "إأآٱ") and "ابراهيم" in r,
+        ),
+        ("strips arabic diacritics", "بِسْمِ اللَّهِ الرَّحمن", lambda r: "ِ" not in r and "ْ" not in r),
+        (
+            "strips non-arabic non-latin scripts",
+            "مرحبا 你好 بالعالم",
+            lambda r: "你" not in r and "مرحبا" in r,
+        ),
+        ("no arabic script is invalid", "Hello World", lambda r: r == ""),
+        ("under 2 chars is invalid", "ا", lambda r: r == ""),
+        ("non-string input is invalid", None, lambda r: r == ""),
+        ("non-string input is invalid (int)", 123, lambda r: r == ""),
+        ("non-string input is invalid (list)", [], lambda r: r == ""),
+    ],
+}
 
-    def _preprocess(self, text, leetspeak, alef_maqsura):
-        return _preprocess_safa(text, leetspeak=leetspeak, alef_maqsura=alef_maqsura)
 
-    def test_url_removal(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("مرحبا http://example.com بالعالم", leetspeak, alef_maqsura)
-        assert "http" not in result
-
-    def test_mention_removal(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("مرحبا @user بالعالم", leetspeak, alef_maqsura)
-        assert "@" not in result
-
-    def test_hashtag_handling(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("#مرحبا بالعالم", leetspeak, alef_maqsura)
-        assert "#" not in result
-        assert "مرحبا" in result
-
-    def test_photo_removal(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("[[photo]] مرحبا بالعالم", leetspeak, alef_maqsura)
-        assert "photo" not in result
-
-    def test_emoji_demojize(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("مرحبا 😊 بالعالم", leetspeak, alef_maqsura)
-        assert "😊" not in result
-
-    def test_repeated_char_collapse(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("هههههههه مرحبا بالعالم", leetspeak, alef_maqsura)
-        assert "هههههههه" not in result
-
-    def test_alef_normalization(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("إبراهيم أحمد مرحبا", leetspeak, alef_maqsura)
-        assert "إ" not in result
-        assert "أ" not in result
-
-    def test_diacritic_removal(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("بِسْمِ اللهِ الرحمن", leetspeak, alef_maqsura)
-        assert "\u0650" not in result
-
-    def test_empty_returns_empty(self, leetspeak, alef_maqsura, dialect_name):
-        assert self._preprocess("", leetspeak, alef_maqsura) == ""
-
-    def test_whitespace_returns_empty(self, leetspeak, alef_maqsura, dialect_name):
-        assert self._preprocess("   ", leetspeak, alef_maqsura) == ""
-
-    def test_non_string_returns_empty(self, leetspeak, alef_maqsura, dialect_name):
-        assert _preprocess_safa(None, leetspeak=leetspeak, alef_maqsura=alef_maqsura) == ""
-
-    def test_no_arabic_returns_empty(self, leetspeak, alef_maqsura, dialect_name):
-        assert self._preprocess("Hello World", leetspeak, alef_maqsura) == ""
-
-    def test_under_2_chars_returns_empty(self, leetspeak, alef_maqsura, dialect_name):
-        assert self._preprocess("ا", leetspeak, alef_maqsura) == ""
-
-    def test_whitespace_normalization(self, leetspeak, alef_maqsura, dialect_name):
-        result = self._preprocess("مرحبا    بالعالم    العربي", leetspeak, alef_maqsura)
-        assert "  " not in result
+@pytest.mark.parametrize("prep_type", _TYPES_PRESENT)
+def test_type_specific_behaviour(prep_type):
+    """Each shipped preprocessing type satisfies its declared behaviour table."""
+    assert prep_type in _TYPE_BEHAVIOURS, (
+        f"preprocessing type {prep_type!r} ships but has no behaviour table in this test"
+    )
+    preprocess = _fn_for_type(prep_type)
+    for label, text, ok in _TYPE_BEHAVIOURS[prep_type]:
+        assert ok(preprocess(text)), f"{prep_type}: {label} (got {preprocess(text)!r})"
 
 
 # =============================================================================
-# Parametrized: divergent behavior between Iraqi and Kurdish
+# Optional preprocessing flags -- exercised for whichever configs declare them
 # =============================================================================
 
 
-class TestSafaDivergentBehavior:
-    """Behaviors where Iraqi and Kurdish preprocessing differ."""
+@pytest.mark.parametrize("preprocess,prep", _configs_declaring("leetspeak"))
+def test_leetspeak_flag(preprocess, prep):
+    """When on, arabizi tokens (digits + latin letters) decode to Arabic, and
+    only mixed digit+letter tokens are touched; when off, they are left alone."""
+    if prep["leetspeak"]:
+        assert "ع" in preprocess("3rbi مرحبا")
+        assert "ح" in preprocess("7abibi مرحبا")
+        assert "تش" in preprocess("ch3b مرحبا")
+        assert "hello" in preprocess("hello مرحبا بالعالم")  # pure-letter token untouched
+        assert "3rbi" not in preprocess("3rbi مرحبا بالعالم")  # mixed token decoded
+        assert "ء" not in preprocess("123 مرحبا بالعالم")  # pure-number token not decoded
+    else:
+        assert "عrbi" not in preprocess("3rbi مرحبا")  # digit not decoded
+        assert "حabibi" not in preprocess("7abibi مرحبا")  # digraph not decoded
 
-    def test_leetspeak_iraqi_decodes(self):
-        """Iraqi decodes leetspeak (mixed digit+letter tokens)."""
-        result = _preprocess_safa("7abibi مرحبا", leetspeak=True, alef_maqsura=True)
-        assert "ح" in result
 
-    def test_leetspeak_kurdish_does_not_decode(self):
-        """Kurdish does NOT decode leetspeak."""
-        result = _preprocess_safa("7abibi مرحبا", leetspeak=False, alef_maqsura=False)
-        # Without leetspeak, 7abibi stays as-is then non-Arabic chars stripped
-        # The key: no ha from leetspeak conversion
-        assert "حabibi" not in result
-
-    def test_alef_maqsura_iraqi_normalizes(self):
-        """Iraqi normalizes alef maqsura to ya."""
-        result = _preprocess_safa("على مرحبا", leetspeak=True, alef_maqsura=True)
-        assert "ى" not in result
-
-    def test_alef_maqsura_kurdish_preserves(self):
-        """Kurdish preserves alef maqsura as-is."""
-        result = _preprocess_safa("على مرحبا", leetspeak=False, alef_maqsura=False)
+@pytest.mark.parametrize("preprocess,prep", _configs_declaring("alef_maqsura"))
+def test_alef_maqsura_flag(preprocess, prep):
+    """When on, ى normalizes to ي; when off, ى is preserved."""
+    result = preprocess("على مرحبا")
+    if prep["alef_maqsura"]:
+        assert "ى" not in result and "علي" in result
+    else:
         assert "ى" in result

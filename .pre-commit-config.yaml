@@ -56,7 +56,7 @@ repos:
         entry: python scripts/render_config.py
         language: system
         pass_filenames: false
-        files: '^(app/dialects/.*\.json|compose\.template\.yml|woodpecker-templates/.*\.yaml)$'
+        files: '^(app/dialects/.*\.json|compose\.template\.yml|woodpecker-templates/.*\.yaml|scripts/render_config\.py)$'  # yamllint disable-line rule:line-length
     repo: local
   - hooks:
       - id: gitleaks

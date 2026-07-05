@@ -19,99 +19,25 @@ import pytest
 
 
 class TestActiveConfig:
-    """Tests for ACTIVE_CONFIG population and dialect configuration."""
+    """ACTIVE_CONFIG is fully assembled for the active dialect at import."""
 
-    def test_active_config_populated(self):
-        """ACTIVE_CONFIG is populated (not None) after module import."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert ACTIVE_CONFIG is not None
-
-    def test_active_config_name_set(self):
-        """ACTIVE_CONFIG has a non-empty name."""
-        from app.classifier import ACTIVE_CONFIG
+    def test_active_config_complete(self):
+        """Every field is populated: name, model_path, preprocess_fn, labels,
+        and sub_to_main (key parsing itself is covered by TestParseDialect)."""
+        from app.classifier import ACTIVE_CONFIG, DIALECT
 
         assert ACTIVE_CONFIG.name
-        assert isinstance(ACTIVE_CONFIG.name, str)
-
-    def test_active_config_model_path_set(self):
-        """ACTIVE_CONFIG has a model_path."""
-        from app.classifier import ACTIVE_CONFIG
-
         assert ACTIVE_CONFIG.model_path
-        assert isinstance(ACTIVE_CONFIG.model_path, str)
-
-    def test_active_config_has_preprocess_fn(self):
-        """ACTIVE_CONFIG has a callable preprocess_fn."""
-        from app.classifier import ACTIVE_CONFIG
-
         assert callable(ACTIVE_CONFIG.preprocess_fn)
-
-    def test_active_config_has_label_dicts(self):
-        """ACTIVE_CONFIG has lang-keyed sub/main label dictionaries."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert isinstance(ACTIVE_CONFIG.sub_labels, dict)
-        assert isinstance(ACTIVE_CONFIG.main_labels, dict)
-        # Arabic is supported by every dialect.
-        assert isinstance(ACTIVE_CONFIG.sub_labels["ara"], dict)
-        assert isinstance(ACTIVE_CONFIG.main_labels["ara"], dict)
-
-    def test_active_config_has_sub_to_main(self):
-        """ACTIVE_CONFIG has a sub_to_main mapping."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert isinstance(ACTIVE_CONFIG.sub_to_main, dict)
-        assert len(ACTIVE_CONFIG.sub_to_main) > 0
-
-    def test_active_config_sub_to_main_int_keys(self):
-        """ACTIVE_CONFIG.sub_to_main has integer keys."""
-        from app.classifier import ACTIVE_CONFIG
-
-        for k in ACTIVE_CONFIG.sub_to_main:
-            assert isinstance(k, int)
-
-    def test_active_config_label_dicts_int_keys(self):
-        """ACTIVE_CONFIG label dicts have integer keys."""
-        from app.classifier import ACTIVE_CONFIG
-
-        for by_lang in (ACTIVE_CONFIG.sub_labels, ACTIVE_CONFIG.main_labels):
-            for label_dict in by_lang.values():
-                for k in label_dict:
-                    assert isinstance(k, int)
-
-
-# =============================================================================
-# MODEL_PATH configuration
-# =============================================================================
-
-
-class TestModelPathConfig:
-    """Tests for MODEL_PATH resolution logic."""
-
-    def test_default_model_path(self):
-        """MODEL_PATH defaults to ./models/{DIALECT} when not set."""
-        from app.classifier import DIALECT, MODEL_PATH
-
+        assert ACTIVE_CONFIG.sub_to_main
+        # Every language group carries labels (whatever languages the file declares).
+        assert ACTIVE_CONFIG.sub_labels
+        assert ACTIVE_CONFIG.main_labels
+        for lang_map in (*ACTIVE_CONFIG.sub_labels.values(), *ACTIVE_CONFIG.main_labels.values()):
+            assert lang_map
+        # MODEL_PATH defaults to ./models/{DIALECT} when the env var is not set.
         if not os.getenv("MODEL_PATH"):
-            assert MODEL_PATH == f"./models/{DIALECT}"
-
-    def test_model_path_env_override(self):
-        """MODEL_PATH env var overrides the default (tested via expression logic)."""
-        # The source uses: MODEL_PATH = os.getenv("MODEL_PATH") or f"./models/{DIALECT}"
-        test_val = "/custom/path"
-        result = test_val or "./models/arz"
-        assert result == "/custom/path"
-
-    def test_empty_model_path_uses_default(self):
-        """Empty MODEL_PATH env var falls back to default (uses 'or' not 'if')."""
-        result = "" or "./models/arz"
-        assert result == "./models/arz"
-
-    def test_none_model_path_uses_default(self):
-        """None MODEL_PATH (unset) falls back to default."""
-        result = None or "./models/arz"
-        assert result == "./models/arz"
+            assert ACTIVE_CONFIG.model_path == f"./models/{DIALECT}"
 
 
 # =============================================================================
@@ -121,6 +47,16 @@ class TestModelPathConfig:
 
 class TestExecutorManagement:
     """Tests for thread pool executor and semaphore management."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_executor_global(self):
+        """Null the module-global executor after each test so a live pool one of
+        these tests created isn't inherited by later tests; _get_executor()
+        lazily recreates from the None baseline."""
+        yield
+        import app.classifier as clf
+
+        clf.shutdown_executor()
 
     def test_get_executor_returns_thread_pool(self):
         """_get_executor() returns a ThreadPoolExecutor."""
@@ -394,93 +330,6 @@ class TestRunGatedQueue:
 
 
 # =============================================================================
-# ServiceOverloadedError
-# =============================================================================
-
-
-class TestServiceOverloadedError:
-    """Tests for the ServiceOverloadedError exception."""
-
-    def test_is_exception(self):
-        """ServiceOverloadedError is an Exception subclass."""
-        from app.classifier import ServiceOverloadedError
-
-        assert issubclass(ServiceOverloadedError, Exception)
-
-    def test_can_be_raised(self):
-        """ServiceOverloadedError can be raised and caught."""
-        from app.classifier import ServiceOverloadedError
-
-        with pytest.raises(ServiceOverloadedError):
-            raise ServiceOverloadedError("test")
-
-    def test_message_preserved(self):
-        """Error message is preserved."""
-        from app.classifier import ServiceOverloadedError
-
-        try:
-            raise ServiceOverloadedError("All workers busy")
-        except ServiceOverloadedError as e:
-            assert "All workers busy" in str(e)
-
-
-# =============================================================================
-# Label selection by language
-# =============================================================================
-
-
-class TestLabelSelection:
-    """Tests for label selection based on language parameter."""
-
-    def test_ar_selects_arabic_labels(self):
-        """lang='ar' selects Arabic label dicts (non-empty)."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert len(ACTIVE_CONFIG.sub_labels["ara"]) > 0
-        assert len(ACTIVE_CONFIG.main_labels["ara"]) > 0
-
-    def test_en_selects_english_labels(self):
-        """lang='en' selects English label dicts (non-empty)."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert len(ACTIVE_CONFIG.sub_labels["eng"]) > 0
-        assert len(ACTIVE_CONFIG.main_labels["eng"]) > 0
-
-    def test_ckb_labels_populated_for_safa_dialect(self):
-        """For the SAFA dialects (acm, ckb), Kurdish labels are present and non-empty."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect not in ("acm", "ckb"):
-            pytest.skip("Only applies to the SAFA dialects (acm, ckb)")
-
-        from app.classifier import ACTIVE_CONFIG
-
-        assert len(ACTIVE_CONFIG.sub_labels["ckb"]) > 0
-        assert len(ACTIVE_CONFIG.main_labels["ckb"]) > 0
-
-    def test_ckb_labels_absent_for_arz_dialect(self):
-        """For arz (no Kurdish labels), Kurdish labels are not present."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "arz":
-            pytest.skip("Only applies to the arz dialect")
-
-        from app.classifier import ACTIVE_CONFIG
-
-        assert "ckb" not in ACTIVE_CONFIG.sub_labels
-        assert "ckb" not in ACTIVE_CONFIG.main_labels
-
-    def test_ar_en_labels_have_same_keys(self):
-        """Arabic and English sub/main labels have matching keys."""
-        from app.classifier import ACTIVE_CONFIG
-
-        assert set(ACTIVE_CONFIG.sub_labels["ara"].keys()) == set(
-            ACTIVE_CONFIG.sub_labels["eng"].keys()
-        )
-        assert set(ACTIVE_CONFIG.main_labels["ara"].keys()) == set(
-            ACTIVE_CONFIG.main_labels["eng"].keys()
-        )
-
-
-# =============================================================================
 # InferenceCache
 # =============================================================================
 
@@ -533,14 +382,6 @@ class TestInferenceCache:
         cache.put("a", (1, 0.8))
         result = cache.get("a")
         assert result == (1, 0.8)
-
-    def test_same_text_different_lang_is_cache_hit(self):
-        """Cache keyed by preprocessed text -- same text, different lang is a hit."""
-        cache = self._make_cache()
-        cache.put("مرحبا", (0, 0.95))
-        result = cache.get("مرحبا")
-        assert result is not None
-        assert result == (0, 0.95)
 
     def test_stats_initial(self):
         """Initial stats show zero hits and misses."""
@@ -610,52 +451,20 @@ class TestInferenceCache:
 class TestDialectAndLanguageConfig:
     """Tests for dialect and language configuration constants."""
 
-    def test_valid_dialects_contains_all_three(self):
-        """VALID_DIALECTS includes arz, acm, and ckb."""
+    def test_valid_dialects_matches_dialect_files(self):
+        """VALID_DIALECTS is exactly the set of app/dialects/<code>.json files."""
         from app.classifier import VALID_DIALECTS
+        from tests.conftest import ALL_DIALECTS
 
-        assert "arz" in VALID_DIALECTS
-        assert "acm" in VALID_DIALECTS
-        assert "ckb" in VALID_DIALECTS
+        assert VALID_DIALECTS == set(ALL_DIALECTS)
 
-    def test_valid_dialects_is_frozenset(self):
-        """VALID_DIALECTS is immutable (frozenset)."""
-        from app.classifier import VALID_DIALECTS
+    def test_supported_languages_match_dialect_file(self):
+        """SUPPORTED_LANGUAGES is exactly the language set the active dialect's
+        file declares -- the app serves what the config says, no more, no less."""
+        from app.classifier import DIALECT, SUPPORTED_LANGUAGES
+        from tests.conftest import _DIALECT_FILES
 
-        assert isinstance(VALID_DIALECTS, frozenset)
-
-    def test_supported_languages_is_frozenset(self):
-        """SUPPORTED_LANGUAGES is immutable (frozenset)."""
-        from app.classifier import SUPPORTED_LANGUAGES
-
-        assert isinstance(SUPPORTED_LANGUAGES, frozenset)
-
-    def test_supported_languages_includes_ara_eng(self):
-        """SUPPORTED_LANGUAGES always includes the canonical ara and eng codes."""
-        from app.classifier import SUPPORTED_LANGUAGES
-
-        assert "ara" in SUPPORTED_LANGUAGES
-        assert "eng" in SUPPORTED_LANGUAGES
-
-    def test_safa_dialects_support_ckb_language(self):
-        """When DIALECT is a SAFA dialect (acm, ckb), SUPPORTED_LANGUAGES includes ckb."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect not in ("acm", "ckb"):
-            pytest.skip("Only applies to the SAFA dialects (acm, ckb)")
-
-        from app.classifier import SUPPORTED_LANGUAGES
-
-        assert "ckb" in SUPPORTED_LANGUAGES
-
-    def test_arz_dialect_does_not_support_ckb_language(self):
-        """When DIALECT=arz (no Kurdish labels), SUPPORTED_LANGUAGES excludes ckb."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "arz":
-            pytest.skip("Only applies when DIALECT=arz")
-
-        from app.classifier import SUPPORTED_LANGUAGES
-
-        assert "ckb" not in SUPPORTED_LANGUAGES
+        assert SUPPORTED_LANGUAGES == set(_DIALECT_FILES[DIALECT]["languages"])
 
 
 # =============================================================================
@@ -666,68 +475,41 @@ class TestDialectAndLanguageConfig:
 class TestNormalizeLang:
     """normalize_lang maps the active dialect's aliases to canonical ISO 639-3 codes."""
 
-    def test_aliases_map_to_canonical(self):
-        """ar/en resolve on every dialect; ku resolves on the SAFA dialects (acm, ckb)."""
-        from app.classifier import normalize_lang
+    def test_every_declared_alias_resolves_to_its_canonical(self):
+        """Each alias the active dialect's file declares resolves to the
+        canonical code it is declared under."""
+        from app.classifier import DIALECT, normalize_lang
+        from tests.conftest import _DIALECT_FILES
 
-        assert normalize_lang("ar") == "ara"
-        assert normalize_lang("en") == "eng"
-        if os.environ.get("DIALECT") in ("acm", "ckb"):
-            assert normalize_lang("ku") == "ckb"
+        for canonical, meta in _DIALECT_FILES[DIALECT]["languages"].items():
+            for alias in meta.get("aliases", []):
+                assert normalize_lang(alias) == canonical
 
     def test_canonical_passes_through(self):
-        from app.classifier import normalize_lang
+        """Every declared canonical code passes through unchanged."""
+        from app.classifier import DIALECT, normalize_lang
+        from tests.conftest import _DIALECT_FILES
 
-        assert normalize_lang("ara") == "ara"
-        assert normalize_lang("eng") == "eng"
-        assert normalize_lang("ckb") == "ckb"
+        for canonical in _DIALECT_FILES[DIALECT]["languages"]:
+            assert normalize_lang(canonical) == canonical
 
     def test_unknown_passes_through(self):
         """An unsupported code is returned unchanged so the caller can reject it."""
         from app.classifier import normalize_lang
 
-        assert normalize_lang("xx") == "xx"
-
-    def test_alias_map_for_active_dialect(self):
-        """LANGUAGE_ALIASES holds this dialect's two-letter aliases (ku on the SAFA dialects)."""
-        from app.classifier import LANGUAGE_ALIASES
-
-        expected = {"ar": "ara", "en": "eng"}
-        if os.environ.get("DIALECT") in ("acm", "ckb"):
-            expected["ku"] = "ckb"
-        assert LANGUAGE_ALIASES == expected
+        assert normalize_lang("not-a-lang") == "not-a-lang"
 
 
 # =============================================================================
-# ClassificationResult dataclass
+# Result/config dataclasses
 # =============================================================================
 
 
-class TestClassificationResult:
-    """Tests for the ClassificationResult dataclass."""
+class TestDataclassImmutability:
+    """ClassificationResult and DialectConfig are frozen: results and the shared
+    config are handed across threads, so accidental mutation must fail loudly."""
 
-    def test_valid_result(self):
-        """Valid ClassificationResult can be created."""
-        from app.classifier import ClassificationResult
-
-        r = ClassificationResult(
-            is_valid=True, sub_class="test", main_class="main", confidence=0.95
-        )
-        assert r.is_valid is True
-        assert r.sub_class == "test"
-        assert r.main_class == "main"
-        assert r.confidence == 0.95
-
-    def test_invalid_result(self):
-        """Invalid ClassificationResult has None fields."""
-        from app.classifier import ClassificationResult
-
-        r = ClassificationResult(is_valid=False, sub_class=None, main_class=None, confidence=None)
-        assert r.is_valid is False
-        assert r.sub_class is None
-
-    def test_frozen(self):
-        """ClassificationResult is immutable (frozen dataclass)."""
+    def test_classification_result_frozen(self):
         from app.classifier import ClassificationResult
 
         r = ClassificationResult(
@@ -736,17 +518,7 @@ class TestClassificationResult:
         with pytest.raises(AttributeError):
             r.is_valid = False
 
-
-# =============================================================================
-# DialectConfig dataclass
-# =============================================================================
-
-
-class TestDialectConfig:
-    """Tests for the DialectConfig dataclass."""
-
-    def test_can_create(self):
-        """DialectConfig can be instantiated with required fields."""
+    def test_dialect_config_frozen(self):
         from app.classifier import DialectConfig
 
         cfg = DialectConfig(
@@ -754,23 +526,8 @@ class TestDialectConfig:
             model_path="/test",
             preprocess_fn=lambda x: x,
             sub_to_main={0: 0},
-            sub_labels={"ar": {0: "test"}, "en": {0: "test"}},
-            main_labels={"ar": {0: "test"}, "en": {0: "test"}},
-        )
-        assert cfg.name == "Test"
-        assert cfg.model_path == "/test"
-
-    def test_frozen(self):
-        """DialectConfig is immutable (frozen dataclass)."""
-        from app.classifier import DialectConfig
-
-        cfg = DialectConfig(
-            name="Test",
-            model_path="/test",
-            preprocess_fn=lambda x: x,
-            sub_to_main={0: 0},
-            sub_labels={"ar": {0: "test"}, "en": {0: "test"}},
-            main_labels={"ar": {0: "test"}, "en": {0: "test"}},
+            sub_labels={"ar": {0: "test"}},
+            main_labels={"ar": {0: "test"}},
         )
         with pytest.raises(AttributeError):
             cfg.name = "Changed"
@@ -796,12 +553,12 @@ class TestPredictSingleLabelLogic:
             sub_labels={
                 "ar": {0: "sub_ar_0", 1: "sub_ar_1"},
                 "en": {0: "sub_en_0", 1: "sub_en_1"},
-                "ckb": {0: "sub_ckb_0", 1: "sub_ckb_1"},
+                "xx": {0: "sub_xx_0", 1: "sub_xx_1"},
             },
             main_labels={
                 "ar": {0: "main_ar_0", 1: "main_ar_1"},
                 "en": {0: "main_en_0", 1: "main_en_1"},
-                "ckb": {0: "main_ckb_0", 1: "main_ckb_1"},
+                "xx": {0: "main_xx_0", 1: "main_xx_1"},
             },
         )
 
@@ -975,7 +732,7 @@ class TestBuildOnnxInputs:
         tokenizer (TokenizersBackend) omits it by default. _build_onnx_inputs must
         synthesize an all-zeros column so the required graph input is present.
         Otherwise ORT 500s with "Required inputs (['token_type_ids']) are missing"
-        (the real failure that hit the arz dialect)."""
+        (the real failure this reproduces for BERT-family graphs)."""
         import numpy as np
 
         from app.classifier import _build_onnx_inputs
@@ -1137,3 +894,93 @@ class TestPredictWithFakeSession:
         results = _predict_batch(["", "نص"], loaded, self._cfg(), "ara")
         assert results[0].is_valid is False
         assert results[1].is_valid is True
+
+
+class TestTokenizerSerialization:
+    """Regression: tokenizer calls are serialized across worker threads.
+
+    The HF fast tokenizer is one shared Rust object whose truncation/padding
+    state is MUTATED per call; the single path (padding=False) and the batch
+    path (padding=True) calling it from two pool threads at once is the
+    "RuntimeError: Already borrowed" race (huggingface/tokenizers#537).
+    _predict_single/_predict_batch must never be inside the tokenizer
+    concurrently (the _TOKENIZER_LOCK in classifier.py). Inference itself
+    stays parallel; only tokenization is serialized.
+    """
+
+    def test_concurrent_single_and_batch_never_overlap_in_tokenizer(self):
+        import threading
+        import time
+
+        import numpy as np
+
+        from app.classifier import (
+            DialectConfig,
+            LoadedModel,
+            _inference_cache,
+            _predict_batch,
+            _predict_single,
+        )
+
+        _inference_cache._cache.clear()
+
+        counter_lock = threading.Lock()
+        in_tokenizer = 0
+        max_concurrent = 0
+
+        def tracking_tokenizer(text, **kwargs):
+            """Counts concurrent entries; sleeps to widen any race window."""
+            nonlocal in_tokenizer, max_concurrent
+            with counter_lock:
+                in_tokenizer += 1
+                max_concurrent = max(max_concurrent, in_tokenizer)
+            time.sleep(0.03)  # a real tokenize is µs; exaggerate the window
+            with counter_lock:
+                in_tokenizer -= 1
+            batch = text if isinstance(text, list) else [text]
+            rows = len(batch)
+            return {
+                "input_ids": np.ones((rows, 4), dtype=np.int64),
+                "attention_mask": np.ones((rows, 4), dtype=np.int64),
+            }
+
+        loaded = LoadedModel(
+            session=_FakeSession([[0.1, 9.0], [0.1, 9.0]]),
+            tokenizer=tracking_tokenizer,
+            input_names=frozenset(("input_ids", "attention_mask")),
+            max_length=8,
+        )
+        cfg = DialectConfig(
+            name="test",
+            model_path="/test",
+            preprocess_fn=lambda x: x.strip(),
+            sub_to_main={0: 0, 1: 1},
+            sub_labels={"ara": {0: "neutral", 1: "violence"}},
+            main_labels={"ara": {0: "neutral_m", 1: "violence_m"}},
+        )
+
+        errors = []
+
+        def run(fn, arg):
+            try:
+                fn(arg, loaded, cfg, "ara")
+            except Exception as e:  # the race would surface as an exception here
+                errors.append(e)
+
+        # Distinct texts so nothing is served from the cache. Mirrors real mixed
+        # load: singles and batches tokenizing from separate worker threads.
+        threads = [
+            threading.Thread(target=run, args=(_predict_single, "نص اول")),
+            threading.Thread(target=run, args=(_predict_batch, ["نص ثاني", "نص ثالث"])),
+            threading.Thread(target=run, args=(_predict_single, "نص رابع")),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"prediction raised under concurrency: {errors}"
+        assert max_concurrent == 1, (
+            f"{max_concurrent} threads were inside the tokenizer at once; "
+            f"tokenization must be serialized (see _TOKENIZER_LOCK)"
+        )

@@ -29,8 +29,9 @@ from transformers import AutoTokenizer
 # -----------------------------------------------------------------------------
 #
 # app/dialects/<code>.json is the single source of truth for a dialect: name,
-# hf_repo, languages (each with a display name and aliases), preprocessing, and
-# labels (sub/main per language + sub_to_main). The dialect code is the filename
+# hf_repo, languages (each with a display name and aliases), preprocessing,
+# labels (sub/main per language + sub_to_main), and the deploy fields mem_limit
+# and replicas. The dialect code is the filename
 # stem. Adding a dialect is a one-file change: the loader globs the directory,
 # the Dockerfile reads the same files to decide which models to download, and
 # nginx renders its routing from them at startup.
@@ -345,6 +346,12 @@ def get_cache_stats() -> dict:
 
 _ACTIVE_LANGUAGES: dict[str, dict] = _DIALECTS_CONFIG[DIALECT]["languages"]
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(_ACTIVE_LANGUAGES)
+# Default response language when a request omits ?lang=: the first canonical code
+# alphabetically among those this dialect declares. Derived, not hardcoded, so a
+# dialect that doesn't serve Arabic still has a working default. Startup label
+# validation guarantees every declared language has labels, so this is always
+# serviceable. (For the shipped dialects this resolves to "ara".)
+DEFAULT_LANGUAGE: str = sorted(SUPPORTED_LANGUAGES)[0]
 # canonical code -> display name
 LANGUAGE_NAMES: dict[str, str] = {code: meta["name"] for code, meta in _ACTIVE_LANGUAGES.items()}
 # alias code -> canonical code (e.g. "ar" -> "ara")
@@ -478,6 +485,14 @@ def _preprocess_safa(text: str, *, leetspeak: bool = False, alef_maqsura: bool =
     Iraqi uses leetspeak decoding and ى→ي; Kurdish does not.
     """
     if not isinstance(text, str) or not text.strip():
+        return ""
+    # Reject overly long inputs up front, before any regex/leetspeak/demojize
+    # work, mirroring _preprocess_nuha's 50-word guard. Bounds per-request CPU:
+    # without this, a single request packed to the nginx body cap with many
+    # short leetspeak tokens could hold an inference slot for tens of seconds
+    # (the leetspeak loop is per-token), and INFERENCE_TIMEOUT would not free it
+    # (the slot releases only when the worker actually finishes).
+    if len(text.split()) > 50:
         return ""
     text = re.sub(r"http\S+|www\S+", "", text)
     text = re.sub(r"@\w+", "", text)
@@ -708,6 +723,16 @@ def _build_onnx_inputs(loaded: LoadedModel, tokenized: dict) -> dict[str, np.nda
 # Classification functions
 # -----------------------------------------------------------------------------
 
+# Serializes tokenizer calls across the CLASSIFIER_WORKERS pool threads. The HF
+# fast tokenizer wraps ONE Rust object and applies per-call truncation/padding
+# by MUTATING its state before encoding; the single path uses padding=False and
+# the batch path padding=True, so two concurrent calls can hit the classic
+# "RuntimeError: Already borrowed" race (huggingface/tokenizers#537) — sporadic
+# 500s under mixed single+batch load. Tokenization is microseconds against an
+# inference of tens of milliseconds, so serializing it costs nothing observable;
+# ONLY the tokenizer call is under the lock — session.run() stays fully parallel.
+_TOKENIZER_LOCK = threading.Lock()
+
 
 def _predict_single(
     text: str, loaded: LoadedModel, cfg: DialectConfig, lang: str
@@ -725,21 +750,22 @@ def _predict_single(
     if cached is not None:
         predicted_id, confidence_val = cached
     else:
-        tokenized = loaded.tokenizer(
-            cleaned,
-            truncation=True,
-            max_length=loaded.max_length,
-            # No padding for a single sequence: pad to nothing, so a short text
-            # costs only its real token count instead of a fixed max_length (128)
-            # forward pass. The exported graphs have a dynamic sequence axis (the
-            # batch path relies on the same), so variable length is fine and this
-            # is the dominant single-classify latency win for short text.
-            padding=False,
-            return_tensors="np",
-            # BERT graphs require token_type_ids; ask for it explicitly so the
-            # transformers 5.x fast tokenizer (which omits it by default) emits it.
-            return_token_type_ids="token_type_ids" in loaded.input_names,
-        )
+        with _TOKENIZER_LOCK:
+            tokenized = loaded.tokenizer(
+                cleaned,
+                truncation=True,
+                max_length=loaded.max_length,
+                # No padding for a single sequence: pad to nothing, so a short text
+                # costs only its real token count instead of a fixed max_length (128)
+                # forward pass. The exported graphs have a dynamic sequence axis (the
+                # batch path relies on the same), so variable length is fine and this
+                # is the dominant single-classify latency win for short text.
+                padding=False,
+                return_tensors="np",
+                # BERT graphs require token_type_ids; ask for it explicitly so the
+                # transformers 5.x fast tokenizer (which omits it by default) emits it.
+                return_token_type_ids="token_type_ids" in loaded.input_names,
+            )
         feed = _build_onnx_inputs(loaded, tokenized)
         logits = loaded.session.run(None, feed)[0]
         confidences, predicted_ids = _softmax_argmax(logits)
@@ -806,16 +832,17 @@ def _predict_batch(
 
     # Run inference only on cache misses
     if miss_texts:
-        tokenized = loaded.tokenizer(
-            miss_texts,
-            truncation=True,
-            max_length=loaded.max_length,
-            padding=True,
-            return_tensors="np",
-            # BERT graphs require token_type_ids; ask for it explicitly so the
-            # transformers 5.x fast tokenizer (which omits it by default) emits it.
-            return_token_type_ids="token_type_ids" in loaded.input_names,
-        )
+        with _TOKENIZER_LOCK:
+            tokenized = loaded.tokenizer(
+                miss_texts,
+                truncation=True,
+                max_length=loaded.max_length,
+                padding=True,
+                return_tensors="np",
+                # BERT graphs require token_type_ids; ask for it explicitly so the
+                # transformers 5.x fast tokenizer (which omits it by default) emits it.
+                return_token_type_ids="token_type_ids" in loaded.input_names,
+            )
         feed = _build_onnx_inputs(loaded, tokenized)
         logits = loaded.session.run(None, feed)[0]
         confidences, predicted_ids = _softmax_argmax(logits)
@@ -916,14 +943,14 @@ async def _run_gated(fn: Callable, *args):
         ) from None
 
 
-async def get_classification(text: str, lang: str = "ara") -> ClassificationResult:
+async def get_classification(text: str, lang: str = DEFAULT_LANGUAGE) -> ClassificationResult:
     """Async single classification."""
     loaded = load_model()
     return await _run_gated(_predict_single, text, loaded, ACTIVE_CONFIG, lang)
 
 
 async def get_classifications_batch(
-    texts: list[str], lang: str = "ara"
+    texts: list[str], lang: str = DEFAULT_LANGUAGE
 ) -> list[ClassificationResult]:
     """Async batch classification. Uses true batching, not sequential calls."""
     loaded = load_model()
