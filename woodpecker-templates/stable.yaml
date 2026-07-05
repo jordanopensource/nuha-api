@@ -72,10 +72,10 @@ steps:
 
   # One image PER DIALECT: each bakes only its own model (selected by the
   # DIALECT build_arg, which the Dockerfile reads to download that dialect's
-  # hf_repo from app/dialects/<code>.json). Published tags carry an EXPLICIT
-  # channel only: <code>-stable plus the SHA-pinned <code>-stable-${CI_COMMIT_SHA}
-  # for rollback. No bare <code> tag exists on any channel; a registry deploy
-  # picks -stable (or -latest) via NUHA_IMAGE_TAG_SUFFIX in compose, so what
+  # hf_repo from app/dialects/<code>.json). Published tags are channel-first:
+  # stable-<code> plus the checksum-pinned stable-<CI_COMMIT_SHA>-<code> for
+  # rollback. No bare <code> tag exists on any channel; a registry deploy
+  # picks stable- (or latest-) via NUHA_IMAGE_TAG_PREFIX in compose, so what
   # production pulls is always an explicit, main-branch-gated choice. The
   # buildx-plugin CI_* metadata args are preserved and the model repos are still
   # read from app/dialects/ at build time (public repos, no HF token). Each build
