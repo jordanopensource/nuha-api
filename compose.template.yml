@@ -5,12 +5,12 @@
 # adding a dialect needs no compose edits here.
 #
 # Each backend builds (and runs) its OWN per-dialect image carrying only that
-# dialect's model: image ${NUHA_IMAGE_PREFIX:-nuha-api}:<code>${NUHA_IMAGE_TAG_SUFFIX:-},
+# dialect's model: image ${NUHA_IMAGE_PREFIX:-nuha-api}:${NUHA_IMAGE_TAG_PREFIX:-}<code>,
 # built with --build-arg DIALECT=<code> (see the generated per-service build
 # sections). With both vars unset, `docker compose build` produces the local
 # nuha-api:<code> images and `docker compose up` runs them. To run CI-published
 # images, set NUHA_IMAGE_PREFIX to the registry repo and pick a channel with
-# NUHA_IMAGE_TAG_SUFFIX (-stable or -latest); CI publishes only channel-suffixed
+# NUHA_IMAGE_TAG_PREFIX (stable- or latest-); CI publishes only channel-first
 # tags, never a bare <code>. The image/build/DIALECT lines are per-dialect, so
 # they are rendered per service; only the truly shared bits live in this anchor.
 name: nuha-api
