@@ -14,15 +14,14 @@ English, or Kurdish without changing which model runs.
 ## How a request flows
 
 A single nginx proxy sits in front of three backend containers, one per dialect.
-The proxy reads the `?dialect=` query parameter and routes the request to the
-matching backend. If you leave `dialect` off, it falls back to Egyptian so older
-clients keep working.
+The proxy reads the dialect from the path (`/<dialect>/classify`) and routes the
+request to the matching backend.
 
 ```
-                         ┌────────────────────┐
-   client ──────────────▶│     nginx proxy    │ :8000
-                         │  routes ?dialect=  │
-                         └──────────┬─────────┘
+                         ┌─────────────────────┐
+   client ──────────────▶│     nginx proxy     │ :8000
+                         │ routes /<dialect>/… │
+                         └──────────┬──────────┘
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
        ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
@@ -211,11 +210,11 @@ so a failing test blocks every image push.
 
 ## The API
 
-| Method | Path              | What it does                |
-|--------|-------------------|-----------------------------|
-| `GET`  | `/health`         | Liveness check              |
-| `POST` | `/classify`       | Classify one text           |
-| `POST` | `/classify/batch` | Classify a list of texts    |
+| Method | Path                        | What it does                          |
+|--------|-----------------------------|---------------------------------------|
+| `GET`  | `/health`                   | Liveness check                        |
+| `POST` | `/{dialect}/classify`       | Classify one text (dialect in path)   |
+| `POST` | `/{dialect}/classify/batch` | Classify a list of texts (dialect in path) |
 
 Interactive docs (`/docs`, `/redoc`, `/openapi.json`) ship DISABLED: `.env`
 sets `DISABLE_DOCS=1` by default, since the docs are the one unauthenticated
@@ -223,26 +222,31 @@ path that isn't classification traffic. To serve them, remove (or comment out)
 the `DISABLE_DOCS=1` line in your `.env` and restart; the proxy already routes
 and rate-limits the docs paths.
 
-### Query parameters
+### Choosing the dialect
 
-Both classify endpoints take the same two query parameters.
+Every request names a dialect in the **path** (`/acm/classify`,
+`/acm/classify/batch`). The proxy routes it to the matching backend, and the
+backend rejects a dialect that is not its own with a 422; an unrecognized dialect
+is a 400 at the proxy. The dialect is always in the path and `lang` always in the
+request body.
 
-- **`dialect`** is optional. It is `arz`, `acm`, or `ckb`. The proxy uses it to
-  pick the backend. Each backend also checks it: if you send a `dialect` that
-  does not match the container, you get a 422. Leave it off and the request goes
-  to the default dialect (Egyptian).
-- **`lang`** sets the language of the labels in the response, not which model
-  runs. It is `ar`, `en`, or `ckb`. `ckb` is valid on the SAFA dialects (Iraqi
-  and Kurdish); ask for it on Egyptian and you get a 422. If you omit it, the
-  default is the first language the dialect declares alphabetically, which is
-  Arabic for every shipped dialect.
+### The `lang` field
+
+- **`lang`** goes in the **request body** (`{"text": "...", "lang": "en"}`) and
+  sets the language of the labels in the response, not which model runs. It
+  accepts a canonical ISO 639-3 code or its two-letter alias (e.g. `ara`/`ar`,
+  `eng`/`en`, `ckb`/`ku`). `ckb` is valid on the SAFA dialects (Iraqi and Kurdish);
+  ask for it on Egyptian and you get a 422. If you omit it, the default is the
+  first language the dialect declares alphabetically, which is Arabic for every
+  shipped dialect.
 
 ### Request and response shapes
 
-`/classify` takes one text:
+`/classify` takes one text and an optional `lang` (omit it for the dialect's
+default language):
 
 ```json
-{ "text": "نص للتصنيف" }
+{ "text": "نص للتصنيف", "lang": "ar" }
 ```
 
 and returns:
@@ -281,31 +285,31 @@ These run against the proxy on port 8000. I verified each one against a running
 container.
 
 ```bash
-# Egyptian Arabic, Arabic labels (lang defaults to ar).
-curl -X POST "http://localhost:8000/classify?dialect=arz" \
+# Egyptian Arabic, Arabic labels (lang defaults to ar). Dialect in the path.
+curl -X POST "http://localhost:8000/arz/classify" \
   -H "Content-Type: application/json" \
   -d '{"text": "مرحبا كيف حالك"}'
 # {"is_valid":true,"sub_class":"محايد","main_class":"محايد","confidence":0.9984}
 
-# Iraqi Arabic, English labels.
-curl -X POST "http://localhost:8000/classify?dialect=acm&lang=en" \
+# Iraqi Arabic, English labels (lang in the body).
+curl -X POST "http://localhost:8000/acm/classify" \
   -H "Content-Type: application/json" \
-  -d '{"text": "شلونك"}'
+  -d '{"text": "شلونك", "lang": "en"}'
 
 # Iraqi Arabic classified, labels returned in Kurdish (both are SAFA dialects).
-curl -X POST "http://localhost:8000/classify?dialect=acm&lang=ckb" \
+curl -X POST "http://localhost:8000/acm/classify" \
   -H "Content-Type: application/json" \
-  -d '{"text": "شلونك"}'
+  -d '{"text": "شلونك", "lang": "ckb"}'
 
 # Sorani Kurdish, Kurdish labels.
-curl -X POST "http://localhost:8000/classify?dialect=ckb&lang=ckb" \
+curl -X POST "http://localhost:8000/ckb/classify" \
   -H "Content-Type: application/json" \
-  -d '{"text": "چۆنی"}'
+  -d '{"text": "چۆنی", "lang": "ckb"}'
 
 # A batch, Egyptian, English labels.
-curl -X POST "http://localhost:8000/classify/batch?dialect=arz&lang=en" \
+curl -X POST "http://localhost:8000/arz/classify/batch" \
   -H "Content-Type: application/json" \
-  -d '{"texts": ["نص اول", "نص تاني", "نص تالت"]}'
+  -d '{"texts": ["نص اول", "نص تاني", "نص تالت"], "lang": "en"}'
 ```
 
 ### Validation and status codes
@@ -321,7 +325,7 @@ The status codes you can get:
 | Code | When                                                                       |
 |------|----------------------------------------------------------------------------|
 | 200  | Success                                                                     |
-| 400  | The proxy received an unknown `dialect` value                               |
+| 400  | Unknown `dialect` at the proxy, or a malformed request body at the backend |
 | 413  | Request body over the size cap (`MAX_BODY_SIZE` / nginx `client_max_body_size`) |
 | 422  | Bad input, a `dialect` that does not match the backend, or an invalid `lang`|
 | 429  | Too many requests: a per-client or per-peer rate limit was exceeded at the proxy |
@@ -329,8 +333,8 @@ The status codes you can get:
 | 503  | Overloaded: every slot is busy, the short queue is full, or a queued request waited too long |
 | 504  | An inference ran past `INFERENCE_TIMEOUT`, which means something is wrong   |
 
-The 400, 500, 503, and 504 codes are additions. The original 200 and 422
-behavior is unchanged, so existing clients keep working.
+The 400, 413, 429, 500, 503, and 504 codes are additions; the 200 and 422 behavior
+is unchanged.
 
 ## Configuration
 
@@ -359,10 +363,10 @@ Anything dialect-specific (memory limit, replica count) is in
 | `PORT`               | `8000`                 | Port the proxy publishes.                                                     |
 | `TIMEOUT`            | `120`                  | Uvicorn keep-alive timeout in seconds. Not a request timeout.                 |
 
-A couple of compose-level variables: `DEFAULT_DIALECT` is the dialect the proxy
-uses for no-dialect requests and for the docs pages. Its compose fallback is
-derived from the dialect files (`arz` when present, otherwise the first dialect
-alphabetically), so it stays valid even if `arz` is removed; override it to pin
+A couple of compose-level variables: `DEFAULT_DIALECT` is the dialect whose
+backend the proxy routes the docs pages to. Its compose value is derived from the
+dialect files (`arz` when present, otherwise the first dialect alphabetically),
+so it stays valid even if `arz` is removed; override it to pin
 a different default.
 `NUHA_IMAGE_PREFIX` (default `nuha-api`) is the repository prefix for the
 per-dialect backend images and `NUHA_IMAGE_TAG_PREFIX` (default empty) is the
@@ -508,10 +512,10 @@ and rebuild. No application code changes.
    ```
 
    This regenerates `compose.yml` (a new backend service for your dialect), the
-   nginx routing (a new route for `?dialect=<code>`), and the per-dialect build
-   steps in the `.woodpecker` pipelines (so CI builds and publishes the new
-   image). The `render-config` pre-commit hook also does this for you on commit,
-   so you usually do not run it by hand.
+   nginx routing (the `/<code>/classify` path maps to the new backend), and the
+   per-dialect build steps in the `.woodpecker` pipelines (so CI builds and
+   publishes the new image). The `render-config` pre-commit hook also does this
+   for you on commit, so you usually do not run it by hand.
 3. Build the image for the new dialect with `docker build --build-arg
    DIALECT=<code> -t nuha-api:<code> .` (or `docker compose build` to build them
    all). The model-download stage reads the dialect file and pulls your new
@@ -633,16 +637,15 @@ dialect file is caught at commit time rather than in CI. `run-samplr` keeps
 `.sample.env` in step with `.env`. (The tests remain the full gate and run in
 CI; the hook's check is the fast structural subset that needs no dependencies.)
 
-## Backward compatibility
+## Response contract
 
-The API stays compatible with the existing frontend:
-
-- A request with no `dialect` routes to Egyptian.
-- The response schema is unchanged: `is_valid`, `sub_class`, `main_class`,
-  `confidence`.
-- The original status codes (200, 422) behave the same. The new codes (400, 413,
-  500, 503, 504) are additions. 422 bodies keep their `detail` list shape but no
-  longer echo the rejected input value back.
+- The response schema is `is_valid`, `sub_class`, `main_class`, `confidence`.
+- Status codes: 200 for a served request and 422 for invalid input; 400 (unknown
+  dialect at the proxy, or a malformed body at the backend), 413 (body too large),
+  429 (rate limited), 500, 503,
+  and 504 cover the
+  error cases. 422 bodies keep their `detail` list shape but do not echo the
+  rejected input value back.
 
 ## Next steps
 

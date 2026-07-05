@@ -112,10 +112,10 @@ class TestDialectAppIntegration:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_default_language_is_serviceable(self, dialect):
-        """The API default ?lang= (first declared language alphabetically,
+        """The API default lang (first declared language alphabetically,
         app/classifier.DEFAULT_LANGUAGE) has both sub and main labels, so a
-        no-lang request always succeeds -- no dialect must declare a specific
-        language."""
+        request that omits lang always succeeds -- no dialect must declare a
+        specific language."""
         cfg = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
         default_lang = sorted(cfg["languages"])[0]
         entry = self.labels[dialect]
