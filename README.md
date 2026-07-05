@@ -110,23 +110,30 @@ for all three backends to report healthy before it accepts traffic.
 Compose tags the images it builds locally `nuha-api:arz`, `nuha-api:acm`, and
 `nuha-api:ckb`. To run CI-published images from a registry instead, set
 `NUHA_IMAGE_PREFIX` to the repository path AND pick a release channel with
-`NUHA_IMAGE_TAG_SUFFIX`; Compose assembles `<prefix>:<code><suffix>` per
+`NUHA_IMAGE_TAG_PREFIX`; Compose assembles `<prefix>:<channel>-<code>` per
 dialect. For the JOSA registry:
 
 ```bash
 NUHA_IMAGE_PREFIX=registry.cloud.josa.ngo/library/nuha-api \
-NUHA_IMAGE_TAG_SUFFIX=-stable docker compose up -d
+NUHA_IMAGE_TAG_PREFIX=stable- docker compose up -d
 ```
 
-That resolves to `…/nuha-api:arz-stable`, `…/nuha-api:acm-stable`, and
-`…/nuha-api:ckb-stable` — images built from `main` after the full CI gate
-(lint, lockfile check, per-dialect tests). Use `NUHA_IMAGE_TAG_SUFFIX=-latest`
-to track branch builds on a staging box. Every tag carries an explicit channel:
-CI publishes `<code>-stable[-<sha>]` from `main` and `<code>-latest[-<sha>]`
-from other branches, and deliberately no bare `<code>` tag — so a deploy always
-states which channel it follows, and a work-in-progress branch push can never
-overwrite what production pulls. The `-<sha>` tags are immutable pins for
-rollback; use one directly in an override file to freeze a deployment.
+Note: only the per-dialect **backend** images come from the registry. The proxy
+runs stock `nginx`, and its routing config is **not baked into any image** — it
+is bind-mounted from the repo (`nginx.conf` and `nginx/dialects.conf.template`).
+So a registry deploy still needs `compose.yml` and those two files present on the
+host.
+
+That resolves to `…/nuha-api:stable-arz`, `…/nuha-api:stable-acm`, and
+`…/nuha-api:stable-ckb` — images built from `main` after the full CI gate
+(lint, lockfile check, per-dialect tests). Use `NUHA_IMAGE_TAG_PREFIX=latest-`
+to track branch builds on a staging box. Tags are channel-first: CI publishes
+`stable-<code>` from `main` and `latest-<code>` from other branches, each with a
+checksum-pinned `<channel>-<sha>-<code>` variant for rollback, and deliberately
+no bare `<code>` tag — so a deploy always states which channel it follows, and a
+work-in-progress branch push can never overwrite what production pulls. The
+`<channel>-<sha>-<code>` pins are immutable; use one directly in an override file
+to freeze a deployment.
 
 ### One dialect in a single container
 
@@ -138,13 +145,13 @@ was built for, so a bare run works.
 ```bash
 docker run -p 8000:8000 nuha-api:arz
 
-# An image from the registry (tags always carry a channel: -stable or -latest),
+# An image from the registry (tags are channel-first: stable-<code> or latest-<code>),
 # with a couple of overrides:
 docker run -p 8000:8000 \
   -e DIALECT=acm \
   -e LOG_LEVEL=DEBUG \
   -e CLASSIFIER_WORKERS=2 \
-  registry.cloud.josa.ngo/library/nuha-api:acm-stable
+  registry.cloud.josa.ngo/library/nuha-api:stable-acm
 ```
 
 ### Locally for development
@@ -358,9 +365,9 @@ derived from the dialect files (`arz` when present, otherwise the first dialect
 alphabetically), so it stays valid even if `arz` is removed; override it to pin
 a different default.
 `NUHA_IMAGE_PREFIX` (default `nuha-api`) is the repository prefix for the
-per-dialect backend images and `NUHA_IMAGE_TAG_SUFFIX` (default empty) is the
-release channel appended after the dialect code — empty for local builds,
-`-stable` or `-latest` for registry images (see Running it). `BACKEND_CPU_LIMIT`,
+per-dialect backend images and `NUHA_IMAGE_TAG_PREFIX` (default empty) is the
+release channel prepended to the dialect code — empty for local builds,
+`stable-` or `latest-` for registry images (see Running it). `BACKEND_CPU_LIMIT`,
 `PROXY_CPU_LIMIT`, `PROXY_MEM_LIMIT`, and `BACKEND_MEM_RESERVATION` set Compose
 resource caps.
 

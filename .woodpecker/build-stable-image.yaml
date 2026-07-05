@@ -67,10 +67,10 @@ steps:
 
   # One image PER DIALECT: each bakes only its own model (selected by the
   # DIALECT build_arg, which the Dockerfile reads to download that dialect's
-  # hf_repo from app/dialects/<code>.json). Published tags carry an EXPLICIT
-  # channel only: <code>-stable plus the SHA-pinned <code>-stable-${CI_COMMIT_SHA}
-  # for rollback. No bare <code> tag exists on any channel; a registry deploy
-  # picks -stable (or -latest) via NUHA_IMAGE_TAG_SUFFIX in compose, so what
+  # hf_repo from app/dialects/<code>.json). Published tags are channel-first:
+  # stable-<code> plus the checksum-pinned stable-<CI_COMMIT_SHA>-<code> for
+  # rollback. No bare <code> tag exists on any channel; a registry deploy
+  # picks stable- (or latest-) via NUHA_IMAGE_TAG_PREFIX in compose, so what
   # production pulls is always an explicit, main-branch-gated choice. The
   # buildx-plugin CI_* metadata args are preserved and the model repos are still
   # read from app/dialects/ at build time (public repos, no HF token). Each build
@@ -83,8 +83,8 @@ steps:
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - acm-stable
-        - acm-stable-${CI_COMMIT_SHA}
+        - stable-acm
+        - stable-${CI_COMMIT_SHA}-acm
       username:
         from_secret: REGISTRY_USERNAME
       password:
@@ -106,8 +106,8 @@ steps:
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - arz-stable
-        - arz-stable-${CI_COMMIT_SHA}
+        - stable-arz
+        - stable-${CI_COMMIT_SHA}-arz
       username:
         from_secret: REGISTRY_USERNAME
       password:
@@ -129,8 +129,8 @@ steps:
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - ckb-stable
-        - ckb-stable-${CI_COMMIT_SHA}
+        - stable-ckb
+        - stable-${CI_COMMIT_SHA}-ckb
       username:
         from_secret: REGISTRY_USERNAME
       password:
