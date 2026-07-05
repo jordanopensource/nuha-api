@@ -64,7 +64,7 @@ services:
 
   nuha-api-acm:
     <<: *backend
-    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:acm
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:${NUHA_IMAGE_TAG_PREFIX:-}acm
     build:
       context: .
       dockerfile: Dockerfile
@@ -83,7 +83,7 @@ services:
 
   nuha-api-arz:
     <<: *backend
-    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:arz
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:${NUHA_IMAGE_TAG_PREFIX:-}arz
     build:
       context: .
       dockerfile: Dockerfile
@@ -102,7 +102,7 @@ services:
 
   nuha-api-ckb:
     <<: *backend
-    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:ckb
+    image: ${NUHA_IMAGE_PREFIX:-nuha-api}:${NUHA_IMAGE_TAG_PREFIX:-}ckb
     build:
       context: .
       dockerfile: Dockerfile
