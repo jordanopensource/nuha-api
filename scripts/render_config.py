@@ -257,9 +257,14 @@ def render_compose(dialects: dict[str, dict]) -> str:
         # ad-hoc burst, `docker compose up --scale nuha-api-<code>=N`. cpu and the
         # memory reservation are uniform across dialects, so they stay shared env.
         # Each backend builds AND runs its own per-dialect image (only that
-        # dialect's model is baked in). The image tag is ${NUHA_IMAGE_PREFIX}:<code>
-        # (default prefix nuha-api), so `docker compose build` yields nuha-api:arz,
-        # nuha-api:acm, ... and `docker compose up` runs them. The build passes
+        # dialect's model is baked in). The image ref is
+        # ${NUHA_IMAGE_PREFIX}:${NUHA_IMAGE_TAG_PREFIX}<code>: with both unset,
+        # `docker compose build` yields the local nuha-api:<code> images and
+        # `docker compose up` runs them. To run CI-published images, set
+        # NUHA_IMAGE_PREFIX to the registry repo AND NUHA_IMAGE_TAG_PREFIX to a
+        # channel ("stable-" or "latest-"), giving e.g. .../nuha-api:stable-acm.
+        # The channel is a tag PREFIX because CI publishes channel-first tags
+        # (stable-<code>); there is no bare <code> tag. The build passes
         # --build-arg DIALECT=<code>, which the Dockerfile uses to download only
         # that model; the runtime DIALECT env (below) must match the baked model.
         # image/build/DIALECT are per-dialect, so they are rendered here rather
@@ -267,7 +272,7 @@ def render_compose(dialects: dict[str, dict]) -> str:
         backends.append(
             f"  nuha-api-{code}:\n"
             f"    <<: *backend\n"
-            f"    image: ${{NUHA_IMAGE_PREFIX:-nuha-api}}:{code}\n"
+            f"    image: ${{NUHA_IMAGE_PREFIX:-nuha-api}}:${{NUHA_IMAGE_TAG_PREFIX:-}}{code}\n"
             f"    build:\n"
             f"      context: .\n"
             f"      dockerfile: Dockerfile\n"
@@ -362,17 +367,21 @@ BUILD_DEPENDS_TOKEN = "__BUILD_DEPENDS__"
 
 
 def _wp_build_step(channel: str, code: str) -> str:
-    """One docker-buildx build step for a dialect on the latest or stable channel."""
-    if channel == "latest":
-        tags = (code, f"{code}-latest", f"{code}-latest-${{CI_COMMIT_SHA}}")
-    else:
-        tags = (f"{code}-stable", f"{code}-stable-${{CI_COMMIT_SHA}}")
+    """One docker-buildx build step for a dialect on the latest or stable channel.
+
+    Published tags are <channel>-<dialect> and, for rollback, the checksum-pinned
+    <channel>-<CI_COMMIT_SHA>-<dialect> (e.g. stable-acm, stable-<sha>-acm,
+    latest-acm, latest-<sha>-acm). Channel-first so all of a channel's tags sort
+    together in the registry; no bare <dialect> tag, so every published image
+    states its channel and a branch build can't overwrite what a deploy pulls.
+    """
+    tags = (f"{channel}-{code}", f"{channel}-${{CI_COMMIT_SHA}}-{code}")
     tag_lines = "\n".join(f"        - {t}" for t in tags)
     # build_args MUST be a map: given a list the plugin collapses it into a
     # single "*" arg, so the build args (DIALECT included) never get set.
     return (
         f"  - name: build-{channel}-image-{code}\n"
-        f"    image: woodpeckerci/plugin-docker-buildx\n"
+        f"    image: woodpeckerci/plugin-docker-buildx:6.1.0\n"
         f"    settings:\n"
         f"      repo: *docker_repo\n"
         f"      registry: *registry_url\n"
@@ -390,7 +399,8 @@ def _wp_build_step(channel: str, code: str) -> str:
         f"        CI_PIPELINE_CREATED: ${{CI_PIPELINE_CREATED}}\n"
         f"    depends_on:\n"
         f"      - run-pre-commit-hooks\n"
-        f"      - check-lockfile"
+        f"      - check-lockfile\n"
+        f"      - run-tests"
     )
 
 

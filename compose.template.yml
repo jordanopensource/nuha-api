@@ -5,11 +5,14 @@
 # adding a dialect needs no compose edits here.
 #
 # Each backend builds (and runs) its OWN per-dialect image carrying only that
-# dialect's model: image ${NUHA_IMAGE_PREFIX:-nuha-api}:<code>, built with
-# --build-arg DIALECT=<code> (see the generated per-service build sections).
-# `docker compose build` produces all per-dialect images; `docker compose up`
-# runs them. The image/build/DIALECT lines are per-dialect, so they are rendered
-# per service; only the truly shared bits live in this anchor.
+# dialect's model: image ${NUHA_IMAGE_PREFIX:-nuha-api}:${NUHA_IMAGE_TAG_PREFIX:-}<code>,
+# built with --build-arg DIALECT=<code> (see the generated per-service build
+# sections). With both vars unset, `docker compose build` produces the local
+# nuha-api:<code> images and `docker compose up` runs them. To run CI-published
+# images, set NUHA_IMAGE_PREFIX to the registry repo and pick a channel with
+# NUHA_IMAGE_TAG_PREFIX (stable- or latest-); CI publishes only channel-first
+# tags, never a bare <code>. The image/build/DIALECT lines are per-dialect, so
+# they are rendered per service; only the truly shared bits live in this anchor.
 name: nuha-api
 
 x-backend: &backend
@@ -36,7 +39,9 @@ x-backend: &backend
 
 services:
   proxy:
-    image: nginx:1.27-alpine
+    # Digest-pinned like the Dockerfile base images: the tag alone is mutable.
+    # To bump: `docker buildx imagetools inspect nginx:<new-tag>` for the digest.
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: nuha-api-proxy
     restart: unless-stopped
     ports:
@@ -46,6 +51,9 @@ services:
       # Filled into the generated routing config at container start by nginx's
       # built-in envsubst; NGINX_ENVSUBST_FILTER limits substitution to this one
       # var so nginx's own $variables are left intact.
+      # The ':-arz' fallback here is the SOURCE default; render_config.py rewrites
+      # it in the generated compose.yml to 'arz' if that dialect exists, else the
+      # first dialect alphabetically, so it never dangles when arz is absent.
       - DEFAULT_DIALECT=${DEFAULT_DIALECT:-arz}
       - NGINX_ENVSUBST_FILTER=DEFAULT_DIALECT
     volumes:
