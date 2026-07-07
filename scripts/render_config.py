@@ -32,6 +32,7 @@ Run from the repo root:  python scripts/render_config.py
 """
 
 import json
+import re
 from pathlib import Path
 
 
@@ -55,15 +56,184 @@ GENERATED_HEADER = (
 )
 
 
+def validate_dialect_config(code: str, cfg: dict) -> list[str]:
+    """Return a list of structural problems with one dialect config (empty = OK).
+
+    Pure and stdlib-only: no network, no import of the app or the ML stack, so it
+    runs in the fast offline pre-commit hook. It mirrors what the app requires to
+    boot and what the test suite asserts, so a structurally broken (but
+    valid-JSON) dialect file is rejected at COMMIT time instead of only in CI.
+
+    Out of scope on purpose (each stays where it belongs): whether
+    ``preprocessing.type`` names a real preprocessor (that would couple this
+    script to app.classifier's registry and break the "adding a preprocessor is a
+    code-only change" rule -- the app checks it at import, the tests check it for
+    every file), and whether ``hf_repo`` actually resolves on HuggingFace (the
+    network model test and the Docker build cover that).
+    """
+    problems: list[str] = []
+
+    def bad(msg: str) -> None:
+        problems.append(f"{code}.json: {msg}")
+
+    # The code (the file stem) is used verbatim as a Docker service name, an image
+    # tag, and the nginx path segment (matched by ^/(?<dia>[a-z]+)/classify), so
+    # constrain it to ASCII lowercase letters -- anything else breaks routing or
+    # the compose/tag charset silently.
+    if not (code.isascii() and code.islower() and code.isalpha()):
+        bad("dialect code (the file stem) must be ASCII lowercase letters only (a-z)")
+
+    missing = [
+        f for f in ("name", "hf_repo", "languages", "preprocessing", "labels") if f not in cfg
+    ]
+    if missing:
+        bad(f"missing required field(s): {', '.join(missing)}")
+        return problems  # can't sensibly validate further without them
+
+    if not (isinstance(cfg["name"], str) and cfg["name"].strip()):
+        bad("'name' must be a non-empty string")
+
+    repo = cfg["hf_repo"]
+    if not (isinstance(repo, str) and repo.strip()):
+        bad("'hf_repo' must be a non-empty string")
+    elif (
+        "://" in repo
+        or any(c.isspace() for c in repo)
+        or [p for p in repo.split("/") if p] != repo.split("/")
+        or repo.count("/") != 1
+    ):
+        bad(f"'hf_repo' must be a 'namespace/name' id, got {repo!r}")
+
+    langs = cfg["languages"]
+    if not (isinstance(langs, dict) and langs):
+        bad("'languages' must be a non-empty object")
+        langs = {}
+    for lc, meta in langs.items():
+        if not (
+            isinstance(meta, dict) and isinstance(meta.get("name"), str) and meta["name"].strip()
+        ):
+            bad(f"language '{lc}' needs a non-empty 'name'")
+        aliases = meta.get("aliases", []) if isinstance(meta, dict) else None
+        if aliases is not None and not (
+            isinstance(aliases, list) and all(isinstance(a, str) and a.strip() for a in aliases)
+        ):
+            bad(f"language '{lc}' 'aliases' must be a list of non-empty strings")
+
+    prep = cfg["preprocessing"]
+    if not (isinstance(prep, dict) and isinstance(prep.get("type"), str) and prep["type"].strip()):
+        bad("'preprocessing' must be an object with a non-empty 'type'")
+
+    if "mem_limit" in cfg and not (
+        isinstance(cfg["mem_limit"], str)
+        and re.fullmatch(r"\d+(\.\d+)? ?[kmgtp]?i?b?", cfg["mem_limit"].strip(), re.IGNORECASE)
+    ):
+        bad("'mem_limit' must be a Docker memory size like '4g', '512m', or '1.5g'")
+    if "replicas" in cfg and not (
+        isinstance(cfg["replicas"], int)
+        and not isinstance(cfg["replicas"], bool)
+        and cfg["replicas"] >= 1
+    ):
+        bad("'replicas' must be an integer >= 1")
+
+    problems.extend(_validate_labels(code, cfg["labels"], set(langs)))
+    return problems
+
+
+def _validate_labels(code: str, labels: object, declared_langs: set[str]) -> list[str]:
+    """Validate the labels block: sub/main/sub_to_main present, label languages
+    match the declared languages, digit keys, non-empty strings, consistent key
+    sets across languages, and a sub_to_main that maps every sub id onto an
+    existing main id (no orphans, no dangling targets)."""
+    problems: list[str] = []
+
+    def bad(msg: str) -> None:
+        problems.append(f"{code}.json: {msg}")
+
+    if not isinstance(labels, dict):
+        bad("'labels' must be an object")
+        return problems
+    for key in ("sub", "main", "sub_to_main"):
+        if not (isinstance(labels.get(key), dict) and labels[key]):
+            bad(f"labels.{key} must be a non-empty object")
+    if problems:
+        return problems  # too broken to cross-check
+
+    for cat in ("sub", "main"):
+        if set(labels[cat]) != declared_langs:
+            bad(
+                f"labels.{cat} languages {sorted(labels[cat])} != "
+                f"declared languages {sorted(declared_langs)}"
+            )
+        reference_keys = None
+        for lc, mapping in labels[cat].items():
+            if not (isinstance(mapping, dict) and mapping):
+                bad(f"labels.{cat}.{lc} must be a non-empty object")
+                continue
+            for label_key, value in mapping.items():
+                if not (isinstance(label_key, str) and label_key.isdigit()):
+                    bad(f"labels.{cat}.{lc} key {label_key!r} must be a digit string")
+                if not (isinstance(value, str) and value.strip()):
+                    bad(f"labels.{cat}.{lc}[{label_key}] must be a non-empty string")
+            if reference_keys is None:
+                reference_keys = set(mapping)
+            elif set(mapping) != reference_keys:
+                bad(f"labels.{cat}.{lc} keys differ from the other languages")
+
+    s2m = labels["sub_to_main"]
+    sub_ids = {int(k) for k in next(iter(labels["sub"].values())) if str(k).isdigit()}
+    main_ids = {int(k) for k in next(iter(labels["main"].values())) if str(k).isdigit()}
+    for key, target in s2m.items():
+        if not (isinstance(key, str) and key.isdigit()):
+            bad(f"sub_to_main key {key!r} must be a digit string")
+        if isinstance(target, bool) or not isinstance(target, int):
+            bad(f"sub_to_main[{key}] must be an integer main id")
+        elif target not in main_ids:
+            bad(f"sub_to_main[{key}] -> {target} has no matching main label")
+    mapped = {int(k) for k in s2m if str(k).isdigit()}
+    if sub_ids - mapped:
+        bad(f"sub ids {sorted(sub_ids - mapped)} have no sub_to_main mapping")
+    if mapped - sub_ids:
+        bad(f"sub_to_main has keys {sorted(mapped - sub_ids)} not present in sub labels")
+    return problems
+
+
 def load_dialects() -> dict[str, dict]:
-    """Return {code: config} for every app/dialects/<code>.json, sorted by code."""
-    dialects = {
-        p.stem: json.loads(p.read_text(encoding="utf-8"))
-        for p in sorted(DIALECTS_DIR.glob("*.json"))
-    }
+    """Return {code: config} for every app/dialects/<code>.json, sorted by code.
+
+    Fails loudly (SystemExit -> the render-config pre-commit hook rejects the
+    commit) on a file that is invalid JSON or structurally broken, so a bad
+    dialect file never reaches the generated config or CI.
+    """
+    dialects: dict[str, dict] = {}
+    parse_errors: list[str] = []
+    for path in sorted(DIALECTS_DIR.glob("*.json")):
+        try:
+            dialects[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            parse_errors.append(f"{path.name}: invalid JSON: {e}")
+    if parse_errors:
+        raise SystemExit("Broken dialect file(s):\n  " + "\n  ".join(parse_errors))
     if not dialects:
         raise SystemExit(f"No dialect files found in {DIALECTS_DIR}")
+
+    problems = [p for code, cfg in dialects.items() for p in validate_dialect_config(code, cfg)]
+    if problems:
+        raise SystemExit(
+            "Structurally invalid dialect file(s) — fix these before committing:\n  "
+            + "\n  ".join(problems)
+        )
     return dialects
+
+
+def _default_dialect(codes: list[str]) -> str:
+    """The dialect used for no-dialect requests and docs routing.
+
+    Prefer 'arz' (the historical default) when it exists, else the first dialect
+    code alphabetically. Derived from the dialect files, not hardcoded, so the
+    fallback stays valid even if 'arz' is removed or was never present -- an
+    operator can still override it at runtime via the DEFAULT_DIALECT env.
+    """
+    return "arz" if "arz" in codes else sorted(codes)[0]
 
 
 def render_compose(dialects: dict[str, dict]) -> str:
@@ -116,10 +286,23 @@ def render_compose(dialects: dict[str, dict]) -> str:
         )
 
     text = COMPOSE_TEMPLATE.read_text(encoding="utf-8")
-    # Drop the template's own leading comment block (everything before `name:`).
-    text = text[text.index("name:") :]
+    # Drop the template's own leading comment block (the same robust helper
+    # render_woodpecker uses, rather than keying on a sentinel word in the comment).
+    text = _strip_leading_comment(text)
     text = text.replace(DEPENDS_MARKER, depends_on)
     text = text.replace(BACKENDS_MARKER, "\n\n".join(backends))
+    # Fill the proxy's DEFAULT_DIALECT fallback from the dialect files rather than
+    # leaving a hardcoded 'arz' that would dangle if arz is absent. The template
+    # carries the 'arz' literal as the source default; substitute the computed
+    # one (a no-op when arz is present, so the committed file is unchanged then).
+    placeholder = "${DEFAULT_DIALECT:-arz}"
+    if placeholder not in text:
+        raise SystemExit(
+            f"compose.template.yml is missing the {placeholder!r} placeholder that "
+            "render_compose rewrites with the derived default dialect (fail loudly "
+            "rather than emit a compose.yml whose proxy default silently dangles)"
+        )
+    text = text.replace(placeholder, f"${{DEFAULT_DIALECT:-{_default_dialect(codes)}}}")
     return GENERATED_HEADER + text
 
 

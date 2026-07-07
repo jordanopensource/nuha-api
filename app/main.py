@@ -11,10 +11,12 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.classifier import (
+    DEFAULT_LANGUAGE,
     DIALECT,
     DIALECT_NAMES,
     LANGUAGE_ALIASES,
@@ -23,6 +25,7 @@ from app.classifier import (
     VALID_DIALECTS,
     InferenceTimeoutError,
     ServiceOverloadedError,
+    _parse_bounded_int,
     get_cache_stats,
     get_classification,
     get_classifications_batch,
@@ -36,22 +39,109 @@ from app.classifier import (
 # Configuration from environment variables
 # -----------------------------------------------------------------------------
 
-
-def _parse_bounded_int(name: str, default: int, lo: int, hi: int) -> int:
-    """Parse an integer env var, requiring it to fall within [lo, hi] (raises if not)."""
-    raw = os.getenv(name, str(default))
-    try:
-        value = int(raw)
-    except ValueError:
-        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from None
-    if value < lo or value > hi:
-        raise RuntimeError(f"{name} must be between {lo} and {hi}, got {value}")
-    return value
-
+# _parse_bounded_int is defined once, in app.classifier, and reused here.
 
 MAX_BATCH_SIZE = _parse_bounded_int("MAX_BATCH_SIZE", 1000, 1, 10000)
 
+# App-layer request body cap in bytes. nginx client_max_body_size (10 MiB) is the
+# primary bound; this is the backstop for a backend exposed without the proxy
+# (e.g. a bare `docker run -p 8000:8000`), where uvicorn would otherwise buffer a
+# body of any size and ride the container to an OOM kill. Keep it in sync with
+# the nginx limit; raise both together to serve larger legitimate batches.
+MAX_BODY_SIZE = _parse_bounded_int("MAX_BODY_SIZE", 10 * 1024 * 1024, 1024, 1024**3)
+
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------------
+# Request body size cap
+# -----------------------------------------------------------------------------
+
+
+class BodyTooLargeError(Exception):
+    """Raised mid-read when a request body exceeds MAX_BODY_SIZE."""
+
+
+_TOO_LARGE_RESPONSE = {
+    "type": "http.response.start",
+    "status": 413,
+    "headers": [(b"content-type", b"application/json")],
+}
+_TOO_LARGE_BODY = {
+    "type": "http.response.body",
+    "body": b'{"detail":"Request body too large"}',
+}
+
+
+class BodySizeLimitMiddleware:
+    """Reject request bodies over ``max_bytes`` with a 413, without buffering.
+
+    Pure ASGI (no BaseHTTPMiddleware), so the overhead is one header scan per
+    request plus an integer add per body chunk; nothing is copied or buffered.
+    Two layers:
+
+    * A declared ``Content-Length`` over the cap is refused up front, before the
+      app sees the request or any body is read.
+    * Chunked bodies (or a lying Content-Length) are counted as they stream; the
+      moment the running total passes the cap, the read raises
+      ``BodyTooLargeError``, aborting the read so nothing is buffered past the
+      cap -- this is the memory-safety guarantee, on every path. Under FastAPI
+      that abort surfaces to the client as a generic 400 body-parse error
+      (FastAPI wraps body reads); the app-level ``BodyTooLargeError`` handler and
+      this middleware's own 413 send are backstops for the case the error
+      propagates instead (e.g. a non-FastAPI mount). Either way the oversized
+      body is never fully read.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for name, value in scope["headers"]:
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    break  # malformed; the server/app will reject it
+                if declared > self.max_bytes:
+                    await send(_TOO_LARGE_RESPONSE)
+                    await send(_TOO_LARGE_BODY)
+                    return
+                break
+
+        received = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise BodyTooLargeError(
+                        f"Request body exceeded {self.max_bytes} bytes mid-read"
+                    )
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except BodyTooLargeError:
+            if response_started:
+                raise
+            await tracking_send(_TOO_LARGE_RESPONSE)
+            await tracking_send(_TOO_LARGE_BODY)
+
 
 # -----------------------------------------------------------------------------
 # Schemas
@@ -135,6 +225,21 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class ValidationErrorItem(BaseModel):
+    """One field error. The 422 handler strips FastAPI's ``input``/``ctx`` echo,
+    so the documented shape carries only the machine-readable location and reason."""
+
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class ValidationErrorResponse(BaseModel):
+    """422 body: validation errors only, never the rejected input."""
+
+    detail: list[ValidationErrorItem]
+
+
 # -----------------------------------------------------------------------------
 # Application
 # -----------------------------------------------------------------------------
@@ -202,6 +307,12 @@ app = FastAPI(
     redoc_url="/redoc" if _ENABLE_DOCS else None,
     openapi_url="/openapi.json" if _ENABLE_DOCS else None,
     responses={
+        400: {"model": ErrorResponse, "description": "Malformed request body"},
+        413: {"model": ErrorResponse, "description": "Request body too large"},
+        422: {
+            "model": ValidationErrorResponse,
+            "description": "Validation error (rejected input is not echoed)",
+        },
         500: {"model": ErrorResponse, "description": "Internal server error"},
         503: {
             "model": ErrorResponse,
@@ -210,6 +321,29 @@ app = FastAPI(
         504: {"model": ErrorResponse, "description": "Inference timed out"},
     },
 )
+
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_SIZE)
+
+
+@app.exception_handler(BodyTooLargeError)
+async def body_too_large_handler(request: Request, exc: BodyTooLargeError):
+    """Return 413 when a streamed body passes MAX_BODY_SIZE mid-read."""
+    return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Return 422 without echoing the rejected input.
+
+    FastAPI's default validation response includes the offending value (its
+    ``input`` and ``ctx`` fields). Inputs here are abuse text and can be ~10 MB
+    batches, so reflect only the machine-readable location and reason.
+    """
+    errors = [
+        {"loc": err.get("loc", ()), "msg": err.get("msg", ""), "type": err.get("type", "")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 @app.exception_handler(ServiceOverloadedError)
@@ -290,7 +424,7 @@ async def health_check() -> HealthResponse:
 @app.post("/classify", response_model=ClassifyResponse, tags=["Classification"])
 async def classify_single(
     request: Annotated[ClassifyRequest, Body()],
-    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
+    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = DEFAULT_LANGUAGE,
     dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
 ) -> ClassifyResponse:
     """
@@ -316,7 +450,7 @@ async def classify_single(
 @app.post("/classify/batch", response_model=BatchClassifyResponse, tags=["Classification"])
 async def classify_batch(
     request: Annotated[BatchClassifyRequest, Body()],
-    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = "ara",
+    lang: Annotated[str, Query(description=_LANG_PARAM_DESC)] = DEFAULT_LANGUAGE,
     dialect: Annotated[str | None, Query(description=_DIALECT_PARAM_DESC)] = None,
 ) -> BatchClassifyResponse:
     """

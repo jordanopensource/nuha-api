@@ -1,212 +1,51 @@
-"""Tests for label data integrity.
+"""Integrity tests for the per-dialect config files.
 
-These tests validate the structure and consistency of the per-dialect config
-files (app/dialects/<code>.json) without any model dependency. They catch data
-corruption, missing mappings, and taxonomy violations. The labels_data/
-dialects_data fixtures reconstruct the legacy flat shapes from the per-dialect
-files.
+The dialect-file SCHEMA (required fields, well-formed hf_repo, label/language
+consistency, sub_to_main integrity, digit keys, ...) is defined in ONE place:
+`validate_dialect_config` in scripts/render_config.py (the commit-time gate).
+These tests assert the shipped files pass that validator rather than
+re-encoding the rules a second time; `test_render_validation.py` proves the
+validator's logic itself. What remains here is what the validator deliberately
+does NOT cover: that the APP can actually parse and load every file
+(_parse_dialect, _build_preprocess_fn, the preprocessing registry) and the
+directory-level invariants. Everything parametrizes over whatever files exist,
+so it holds for one dialect file or a thousand.
 """
 
 import json
 
 import pytest
 
-from tests.conftest import ALL_DIALECTS, DIALECTS_DIR, _dialect_file
+from tests.conftest import ALL_DIALECTS, DIALECTS_DIR, _dialect_file, validate_dialect_config
 
 
 # =============================================================================
-# label data structure tests
+# Schema: assert through the single validator (no parallel re-encoding)
 # =============================================================================
 
 
-class TestLabelsJsonStructure:
-    """Verify the structural integrity of each dialect's label data."""
-
-    @pytest.fixture(autouse=True)
-    def _load_labels(self, labels_data):
-        self.labels = labels_data
+class TestDialectFilesValid:
+    """Every shipped dialect file satisfies the schema validator."""
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_dialect_file_parses_successfully(self, dialect):
-        """Each dialect file is valid JSON with a labels block."""
-        data = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
-        assert isinstance(data, dict)
-        assert "labels" in data
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_dialect_present(self, dialect):
-        """All three dialects have label data."""
-        assert dialect in self.labels, f"Dialect '{dialect}' missing label data"
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_sub_to_main_targets_exist_in_main(self, dialect):
-        """Every sub_to_main target exists in main labels."""
-        entry = self.labels[dialect]
-        main_ids = {int(k) for k in entry["main"]["ara"]}
-        for sub_id, main_id in entry["sub_to_main"].items():
-            assert main_id in main_ids, (
-                f"Dialect '{dialect}': sub_to_main maps sub {sub_id} to main {main_id}, "
-                f"but main {main_id} does not exist in main labels"
-            )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_sub_to_main_sources_exist_in_sub(self, dialect):
-        """Every sub_to_main key exists in sub labels."""
-        entry = self.labels[dialect]
-        sub_ids = {int(k) for k in entry["sub"]["ara"]}
-        for sub_id_str in entry["sub_to_main"]:
-            sub_id = int(sub_id_str)
-            assert sub_id in sub_ids, (
-                f"Dialect '{dialect}': sub_to_main has key {sub_id}, "
-                f"but it does not exist in sub labels"
-            )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_every_sub_has_mapping(self, dialect):
-        """Every sub-class ID has a mapping in sub_to_main (no orphans)."""
-        entry = self.labels[dialect]
-        sub_ids = {int(k) for k in entry["sub"]["ara"]}
-        mapped_ids = {int(k) for k in entry["sub_to_main"]}
-        orphans = sub_ids - mapped_ids
-        assert not orphans, f"Dialect '{dialect}': sub IDs {orphans} have no mapping in sub_to_main"
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_ar_en_sub_labels_same_keys(self, dialect):
-        """Arabic and English sub label dicts have the same keys."""
-        entry = self.labels[dialect]
-        ar_keys = set(entry["sub"]["ara"].keys())
-        en_keys = set(entry["sub"]["eng"].keys())
-        assert ar_keys == en_keys, (
-            f"Dialect '{dialect}': ar sub keys {ar_keys} != en sub keys {en_keys}"
-        )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_ar_en_main_labels_same_keys(self, dialect):
-        """Arabic and English main label dicts have the same keys."""
-        entry = self.labels[dialect]
-        ar_keys = set(entry["main"]["ara"].keys())
-        en_keys = set(entry["main"]["eng"].keys())
-        assert ar_keys == en_keys, (
-            f"Dialect '{dialect}': ar main keys {ar_keys} != en main keys {en_keys}"
-        )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_no_empty_label_strings(self, dialect):
-        """No label string is empty or whitespace-only."""
-        entry = self.labels[dialect]
-        for category in ("sub", "main"):
-            for lang, labels in entry[category].items():
-                for key, value in labels.items():
-                    assert value.strip(), (
-                        f"Dialect '{dialect}', {category}/{lang}, key {key}: "
-                        f"label is empty or whitespace"
-                    )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_keys_are_valid_non_negative_integers(self, dialect):
-        """All label keys and sub_to_main keys are valid non-negative integer strings."""
-        entry = self.labels[dialect]
-        for category in ("sub", "main"):
-            for lang, labels in entry[category].items():
-                for key in labels:
-                    assert key.isdigit(), (
-                        f"Dialect '{dialect}', {category}/{lang}: "
-                        f"key '{key}' is not a valid non-negative integer"
-                    )
-        for key in entry["sub_to_main"]:
-            assert key.isdigit(), (
-                f"Dialect '{dialect}': sub_to_main key '{key}' is not a valid non-negative integer"
-            )
+    def test_passes_schema_validator(self, dialect):
+        """The file has no structural problems per validate_dialect_config —
+        the same check the render-config pre-commit hook runs. This covers
+        required fields and types, hf_repo shape, languages, label/language
+        consistency, digit keys, non-empty label strings, and sub_to_main
+        integrity, all from one definition."""
+        cfg = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
+        problems = validate_dialect_config(dialect, cfg)
+        assert problems == [], f"Dialect '{dialect}' failed schema validation: {problems}"
 
 
 # =============================================================================
-# Kurdish-specific labels
-# =============================================================================
-
-
-class TestKurdishLabels:
-    """Verify Kurdish-specific label requirements."""
-
-    @pytest.fixture(autouse=True)
-    def _load_labels(self, labels_data):
-        self.labels = labels_data
-
-    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
-    def test_safa_dialect_has_kurdish_sub_labels(self, dialect):
-        """The SAFA dialects (acm, ckb) have 'ckb' sub labels."""
-        assert "ckb" in self.labels[dialect]["sub"]
-        assert len(self.labels[dialect]["sub"]["ckb"]) > 0
-
-    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
-    def test_safa_dialect_has_kurdish_main_labels(self, dialect):
-        """The SAFA dialects (acm, ckb) have 'ckb' main labels."""
-        assert "ckb" in self.labels[dialect]["main"]
-        assert len(self.labels[dialect]["main"]["ckb"]) > 0
-
-    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
-    def test_safa_kurdish_labels_same_keys_as_ar(self, dialect):
-        """Kurdish sub/main labels have the same keys as the Arabic labels."""
-        entry = self.labels[dialect]
-        assert set(entry["sub"]["ckb"].keys()) == set(entry["sub"]["ara"].keys())
-        assert set(entry["main"]["ckb"].keys()) == set(entry["main"]["ara"].keys())
-
-    def test_arz_lacks_kurdish_labels(self):
-        """arz, the only non-SAFA dialect, has no 'ckb' labels (or empty dicts)."""
-        entry = self.labels["arz"]
-        assert len(entry["sub"].get("ckb", {})) == 0, "arz should not have Kurdish sub labels"
-        assert len(entry["main"].get("ckb", {})) == 0, "arz should not have Kurdish main labels"
-
-
-# =============================================================================
-# SAFA taxonomy structure (Iraqi and Kurdish share the same structure)
-# =============================================================================
-
-
-class TestSafaTaxonomy:
-    """Verify that Iraqi and Kurdish share the SAFA taxonomy structure."""
-
-    @pytest.fixture(autouse=True)
-    def _load_labels(self, labels_data):
-        self.labels = labels_data
-
-    def test_safa_same_number_of_subs(self):
-        """Iraqi and Kurdish have the same number of sub-classes."""
-        acm_subs = len(self.labels["acm"]["sub"]["ara"])
-        ckb_subs = len(self.labels["ckb"]["sub"]["ara"])
-        assert acm_subs == ckb_subs
-
-    def test_safa_same_number_of_mains(self):
-        """Iraqi and Kurdish have the same number of main classes."""
-        acm_mains = len(self.labels["acm"]["main"]["ara"])
-        ckb_mains = len(self.labels["ckb"]["main"]["ara"])
-        assert acm_mains == ckb_mains
-
-    def test_safa_same_sub_to_main_mapping(self):
-        """Iraqi and Kurdish share the same sub_to_main mapping."""
-        assert self.labels["acm"]["sub_to_main"] == self.labels["ckb"]["sub_to_main"]
-
-    def test_safa_share_kurdish_labels(self):
-        """Iraqi and Kurdish carry the identical Kurdish (ckb) label set."""
-        assert self.labels["acm"]["sub"]["ckb"] == self.labels["ckb"]["sub"]["ckb"]
-        assert self.labels["acm"]["main"]["ckb"] == self.labels["ckb"]["main"]["ckb"]
-
-    def test_arz_different_structure(self):
-        """Egyptian has a different structure (different sub/main counts)."""
-        arz_subs = len(self.labels["arz"]["sub"]["ara"])
-        acm_subs = len(self.labels["acm"]["sub"]["ara"])
-        arz_mains = len(self.labels["arz"]["main"]["ara"])
-        acm_mains = len(self.labels["acm"]["main"]["ara"])
-        assert arz_subs != acm_subs
-        assert arz_mains != acm_mains
-
-
-# =============================================================================
-# _parse_dialect() function
+# App parsing: what the validator does not cover (int-key conversion, shape)
 # =============================================================================
 
 
 class TestParseDialect:
-    """Verify that _parse_dialect() produces the correct output format."""
+    """_parse_dialect() converts any valid dialect file the way the app needs."""
 
     @pytest.fixture(autouse=True)
     def _import_parser(self):
@@ -216,7 +55,8 @@ class TestParseDialect:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_produces_int_keys(self, dialect):
-        """_parse_dialect() converts JSON string keys to int keys."""
+        """JSON string keys become int keys (the schema validator checks they
+        are digit strings; this checks the app actually converts them)."""
         parsed = self._parse_dialect(dialect)
         for k in parsed["sub_to_main"]:
             assert isinstance(k, int), f"Dialect '{dialect}', sub_to_main: key {k!r} is not int"
@@ -229,99 +69,117 @@ class TestParseDialect:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_contains_expected_keys(self, dialect):
-        """_parse_dialect() returns dict with all expected keys."""
+        """_parse_dialect() returns exactly the keys ACTIVE_CONFIG expects."""
         parsed = self._parse_dialect(dialect)
         assert set(parsed.keys()) == {"sub_to_main", "sub_labels", "main_labels"}
 
-    @pytest.mark.parametrize("dialect", ["acm", "ckb"])
-    def test_safa_has_nonempty_kurdish_labels(self, dialect):
-        """For the SAFA dialects (acm, ckb), Kurdish sub/main labels are present and non-empty."""
+    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
+    def test_parsed_languages_match_file(self, dialect):
+        """The parsed label groups carry exactly the languages the file's labels
+        block carries -- nothing dropped, nothing invented."""
         parsed = self._parse_dialect(dialect)
-        assert len(parsed["sub_labels"]["ckb"]) > 0
-        assert len(parsed["main_labels"]["ckb"]) > 0
-
-    def test_arz_has_no_kurdish_labels(self):
-        """For arz (the only non-SAFA dialect), no Kurdish label group is present."""
-        parsed = self._parse_dialect("arz")
-        assert "ckb" not in parsed["sub_labels"]
-        assert "ckb" not in parsed["main_labels"]
+        raw = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))["labels"]
+        assert set(parsed["sub_labels"]) == set(raw["sub"])
+        assert set(parsed["main_labels"]) == set(raw["main"])
 
 
 # =============================================================================
-# dialect file structure tests
+# App integration: the file is not just well-formed, it is loadable/servable
 # =============================================================================
 
 
-class TestDialectsJsonStructure:
-    """Verify the structural integrity of the per-dialect config files."""
+class TestDialectAppIntegration:
+    """Beyond the schema: the app can build the preprocessor, the declared
+    default language is serviceable, and the whole loader accepts every file."""
 
     @pytest.fixture(autouse=True)
-    def _load(self, labels_data, dialects_data):
+    def _load(self, labels_data):
         self.labels = labels_data
-        self.dialects = dialects_data
-
-    def test_one_file_per_dialect(self):
-        """The dialects directory holds exactly one file per known dialect."""
-        files = {p.stem for p in DIALECTS_DIR.glob("*.json")}
-        assert files == set(ALL_DIALECTS)
-
-    def test_languages_declared_with_names_and_aliases(self):
-        """Each dialect declares its languages by canonical code with a name and aliases."""
-        for code in ALL_DIALECTS:
-            languages = json.loads(_dialect_file(code).read_text(encoding="utf-8"))["languages"]
-            assert isinstance(languages, dict)
-            assert {"ara", "eng"}.issubset(languages.keys())
-            for meta in languages.values():
-                assert "name" in meta
-                assert isinstance(meta.get("aliases", []), list)
-
-    def test_language_aliases(self):
-        """The two-letter ISO 639-1 codes are declared as aliases of the canonical codes."""
-        arz = json.loads(_dialect_file("arz").read_text(encoding="utf-8"))["languages"]
-        assert "ar" in arz["ara"]["aliases"]
-        assert "en" in arz["eng"]["aliases"]
-        ckb = json.loads(_dialect_file("ckb").read_text(encoding="utf-8"))["languages"]
-        assert "ku" in ckb["ckb"]["aliases"]
-
-    def test_all_dialects_present(self):
-        """All expected dialects are loaded."""
-        for dialect in ALL_DIALECTS:
-            assert dialect in self.dialects["dialects"]
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_dialect_has_labels_entry(self, dialect):
-        """Every dialect file carries its own labels block."""
-        assert dialect in self.labels
+    def test_preprocessing_config_is_usable(self, dialect):
+        """The preprocessing block builds into a working callable: the type is
+        one the classifier's registry knows AND every other key is accepted as
+        a kwarg (a stray/misspelled option surfaces here, not at first request).
+        This is the app-side check the schema validator deliberately omits to
+        stay decoupled from the preprocessing registry."""
+        from app.classifier import _build_preprocess_fn
+
+        cfg = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
+        fn = _build_preprocess_fn(cfg["preprocessing"])
+        assert callable(fn)
+        assert isinstance(fn("مرحبا بالعالم"), str)
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_languages_have_label_entries(self, dialect):
-        """All declared languages have label entries in the dialect file."""
-        cfg = self.dialects["dialects"][dialect]
-        for lang in cfg["languages"]:
-            entry = self.labels[dialect]
-            assert lang in entry["sub"], (
-                f"Dialect '{dialect}': language '{lang}' declared but no sub labels in its file"
-            )
-            assert lang in entry["main"], (
-                f"Dialect '{dialect}': language '{lang}' declared but no main labels in its file"
-            )
-
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_preprocessing_type_valid(self, dialect):
-        """Preprocessing type is a recognized type."""
-        cfg = self.dialects["dialects"][dialect]
-        valid_types = {"nuha", "safa"}
-        prep_type = cfg["preprocessing"]["type"]
-        assert prep_type in valid_types, (
-            f"Dialect '{dialect}': preprocessing type '{prep_type}' "
-            f"not in valid types {valid_types}"
+    def test_default_language_is_serviceable(self, dialect):
+        """The API default ?lang= (first declared language alphabetically,
+        app/classifier.DEFAULT_LANGUAGE) has both sub and main labels, so a
+        no-lang request always succeeds -- no dialect must declare a specific
+        language."""
+        cfg = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
+        default_lang = sorted(cfg["languages"])[0]
+        entry = self.labels[dialect]
+        assert entry["sub"].get(default_lang) and entry["main"].get(default_lang), (
+            f"Dialect '{dialect}': default lang '{default_lang}' is missing labels"
         )
 
-    @pytest.mark.parametrize("dialect", ALL_DIALECTS)
-    def test_dialect_has_required_fields(self, dialect):
-        """Each dialect config has all required fields."""
-        cfg = self.dialects["dialects"][dialect]
-        required = {"name", "hf_repo", "languages", "preprocessing"}
-        assert required.issubset(set(cfg.keys())), (
-            f"Dialect '{dialect}' missing fields: {required - set(cfg.keys())}"
+
+# =============================================================================
+# Dialects directory: invariants that hold no matter how many files exist
+# =============================================================================
+
+
+class TestDialectsDirectory:
+    """Whole-directory invariants: the app requires at least one dialect, every
+    *.json must parse, each stem must be a clean dialect code, and the app's own
+    loader must accept every file. These hold for one file or a thousand,
+    whoever authored them."""
+
+    def test_directory_has_at_least_one_dialect(self):
+        """The app raises at import if app/dialects/ is empty; guard that here."""
+        files = list(DIALECTS_DIR.glob("*.json"))
+        assert files, "no app/dialects/*.json found; the app cannot start"
+
+    def test_every_json_file_parses_to_an_object(self):
+        """Every *.json in the directory is valid JSON and a dict (a broken file
+        would crash the app's _load_dialects_config at import)."""
+        for path in sorted(DIALECTS_DIR.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                raise AssertionError(f"{path.name} is not valid JSON: {e}") from e
+            assert isinstance(data, dict), f"{path.name} must contain a JSON object"
+
+    def test_discovered_dialects_match_directory(self):
+        """conftest's ALL_DIALECTS is exactly the set of *.json stems, and each
+        stem is a plausible dialect code (lowercase letters, no path junk) that
+        the app, nginx routing, and image tags can all use verbatim."""
+        stems = {p.stem for p in DIALECTS_DIR.glob("*.json")}
+        assert set(ALL_DIALECTS) == stems
+        for code in stems:
+            assert code and code.isascii() and code.islower() and code.isalpha(), (
+                f"dialect code '{code}' is not a clean lowercase ASCII identifier"
+            )
+
+    def test_app_loads_every_dialect(self):
+        """The app's own loader accepts every file on disk: the ground truth
+        that a passing suite implies the API boots for each dialect, whoever
+        added the file. Mirrors _load_dialects_config + the per-dialect
+        DialectConfig assembly (_parse_dialect + _build_preprocess_fn)."""
+        from app.classifier import (
+            DialectConfig,
+            _build_preprocess_fn,
+            _load_dialects_config,
+            _parse_dialect,
         )
+
+        config = _load_dialects_config()
+        assert set(config) == set(ALL_DIALECTS)
+        for code, cfg in config.items():
+            parsed = _parse_dialect(code)
+            DialectConfig(
+                name=cfg["name"],
+                model_path=f"./models/{code}",
+                preprocess_fn=_build_preprocess_fn(cfg["preprocessing"]),
+                **parsed,
+            )  # must construct without raising

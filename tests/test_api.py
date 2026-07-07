@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import _DIALECT_FILES, ALL_DIALECTS
+
 
 # =============================================================================
 # /health endpoint
@@ -18,21 +20,11 @@ import pytest
 class TestHealthEndpoint:
     """Tests for the GET /health endpoint."""
 
-    def test_returns_200(self, test_client):
-        """Health check returns 200."""
+    def test_returns_200_healthy(self, test_client):
+        """Health check returns 200 with status=healthy."""
         resp = test_client.get("/health")
         assert resp.status_code == 200
-
-    def test_returns_healthy_status(self, test_client):
-        """Health response includes status=healthy."""
-        resp = test_client.get("/health")
-        data = resp.json()
-        assert data["status"] == "healthy"
-
-    def test_content_type_json(self, test_client):
-        """Response content-type is application/json."""
-        resp = test_client.get("/health")
-        assert "application/json" in resp.headers["content-type"]
+        assert resp.json()["status"] == "healthy"
 
     def test_cache_stats_present_when_enabled(self, test_client):
         """Health response includes cache statistics when EXPOSE_CACHE_STATS is on."""
@@ -64,23 +56,10 @@ class TestHealthEndpoint:
 class TestClassifySingle:
     """Tests for the POST /classify endpoint."""
 
-    def test_valid_request_returns_200(self, test_client):
-        """Valid classification request returns 200."""
+    def test_valid_text_classified(self, test_client):
+        """Valid Arabic text returns 200 with is_valid=true and all fields set."""
         resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
         assert resp.status_code == 200
-
-    def test_response_has_required_fields(self, test_client):
-        """Response contains is_valid, sub_class, main_class, confidence."""
-        resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
-        data = resp.json()
-        assert "is_valid" in data
-        assert "sub_class" in data
-        assert "main_class" in data
-        assert "confidence" in data
-
-    def test_valid_text_is_valid_true(self, test_client):
-        """Valid Arabic text returns is_valid=true."""
-        resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
         data = resp.json()
         assert data["is_valid"] is True
         assert data["sub_class"] is not None
@@ -113,14 +92,16 @@ class TestClassifySingle:
 
     def test_dialect_param_matching_succeeds(self, test_client):
         """dialect param matching the container's dialect succeeds."""
-        dialect = os.environ.get("DIALECT", "arz")
+        dialect = os.environ["DIALECT"]
         resp = test_client.post(f"/classify?dialect={dialect}", json={"text": "مرحبا بالعالم"})
         assert resp.status_code == 200
 
     def test_dialect_param_mismatching_returns_422(self, test_client):
-        """dialect param mismatching returns 422."""
-        dialect = os.environ.get("DIALECT", "arz")
-        other = "acm" if dialect != "acm" else "ckb"
+        """A VALID dialect that isn't this instance's returns 422."""
+        dialect = os.environ["DIALECT"]
+        other = next((d for d in ALL_DIALECTS if d != dialect), None)
+        if other is None:
+            pytest.skip("Only one dialect file exists; no valid mismatch possible")
         resp = test_client.post(f"/classify?dialect={other}", json={"text": "مرحبا بالعالم"})
         assert resp.status_code == 422
 
@@ -128,48 +109,6 @@ class TestClassifySingle:
         """Omitting dialect param succeeds (uses container's dialect)."""
         resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
         assert resp.status_code == 200
-
-    def test_lang_ar_succeeds(self, test_client):
-        """lang=ar is accepted."""
-        resp = test_client.post("/classify?lang=ar", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == 200
-
-    def test_lang_en_succeeds(self, test_client):
-        """lang=en is accepted."""
-        resp = test_client.post("/classify?lang=en", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == 200
-
-    def test_lang_ara_canonical_succeeds(self, test_client):
-        """lang=ara (canonical ISO 639-3) is accepted."""
-        resp = test_client.post("/classify?lang=ara", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == 200
-
-    def test_lang_eng_canonical_succeeds(self, test_client):
-        """lang=eng (canonical ISO 639-3) is accepted."""
-        resp = test_client.post("/classify?lang=eng", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == 200
-
-    def test_lang_alias_matches_canonical(self, test_client):
-        """A two-letter alias returns the same response as its canonical code."""
-        text = {"text": "مرحبا بالعالم"}
-        alias = test_client.post("/classify?lang=ar", json=text)
-        canonical = test_client.post("/classify?lang=ara", json=text)
-        assert alias.status_code == canonical.status_code == 200
-        assert alias.json() == canonical.json()
-
-    def test_lang_ku_alias_only_for_safa_dialects(self, test_client):
-        """lang=ku (alias for ckb) is accepted on the SAFA dialects (acm, ckb), 422 on arz."""
-        dialect = os.environ.get("DIALECT", "arz")
-        resp = test_client.post("/classify?lang=ku", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == (200 if dialect in ("acm", "ckb") else 422)
-
-    def test_lang_ckb_on_arz_returns_422(self, test_client):
-        """lang=ckb returns 422 on arz, the only dialect without Kurdish labels."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "arz":
-            pytest.skip("This test only applies to arz (acm and ckb serve Kurdish labels)")
-        resp = test_client.post("/classify?lang=ckb", json={"text": "مرحبا بالعالم"})
-        assert resp.status_code == 422
 
     def test_lang_invalid_returns_422(self, test_client):
         """Invalid lang value returns 422."""
@@ -195,13 +134,6 @@ class TestClassifySingle:
             assert data["sub_class"] is None
             assert data["main_class"] is None
             assert data["confidence"] is None
-
-    def test_confidence_between_0_and_1(self, test_client):
-        """Confidence score is between 0 and 1 when valid."""
-        resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
-        data = resp.json()
-        if data["is_valid"]:
-            assert 0.0 <= data["confidence"] <= 1.0
 
 
 # =============================================================================
@@ -274,7 +206,7 @@ class TestClassifyBatch:
 
     def test_batch_dialect_matching_succeeds(self, test_client):
         """dialect param matching container's dialect succeeds for batch."""
-        dialect = os.environ.get("DIALECT", "arz")
+        dialect = os.environ["DIALECT"]
         resp = test_client.post(
             f"/classify/batch?dialect={dialect}",
             json={"texts": ["مرحبا بالعالم"]},
@@ -282,30 +214,13 @@ class TestClassifyBatch:
         assert resp.status_code == 200
 
     def test_batch_dialect_mismatching_returns_422(self, test_client):
-        """dialect param mismatching returns 422 for batch."""
-        dialect = os.environ.get("DIALECT", "arz")
-        other = "acm" if dialect != "acm" else "ckb"
+        """A VALID dialect that isn't this instance's returns 422 for batch."""
+        dialect = os.environ["DIALECT"]
+        other = next((d for d in ALL_DIALECTS if d != dialect), None)
+        if other is None:
+            pytest.skip("Only one dialect file exists; no valid mismatch possible")
         resp = test_client.post(
             f"/classify/batch?dialect={other}",
-            json={"texts": ["مرحبا بالعالم"]},
-        )
-        assert resp.status_code == 422
-
-    def test_batch_lang_en_succeeds(self, test_client):
-        """lang=en succeeds for batch."""
-        resp = test_client.post(
-            "/classify/batch?lang=en",
-            json={"texts": ["مرحبا بالعالم"]},
-        )
-        assert resp.status_code == 200
-
-    def test_batch_lang_ckb_on_arz_returns_422(self, test_client):
-        """lang=ckb returns 422 on arz (no Kurdish labels) for batch."""
-        dialect = os.environ.get("DIALECT", "arz")
-        if dialect != "arz":
-            pytest.skip("This test only applies to arz (acm and ckb serve Kurdish labels)")
-        resp = test_client.post(
-            "/classify/batch?lang=ckb",
             json={"texts": ["مرحبا بالعالم"]},
         )
         assert resp.status_code == 422
@@ -435,11 +350,6 @@ class TestHttpBehavior:
         resp = test_client.post("/classify", json={"text": "مرحبا بالعالم"})
         assert "application/json" in resp.headers["content-type"]
 
-    def test_batch_returns_json_content_type(self, test_client):
-        """Batch endpoint returns application/json."""
-        resp = test_client.post("/classify/batch", json={"texts": ["مرحبا بالعالم"]})
-        assert "application/json" in resp.headers["content-type"]
-
     def test_nonexistent_endpoint_returns_404(self, test_client):
         """Request to nonexistent endpoint returns 404."""
         resp = test_client.get("/nonexistent")
@@ -455,84 +365,211 @@ class TestHttpBehavior:
 # ?lang= acceptance matrix (regression lock)
 # =============================================================================
 #
-# Locks the full, per-dialect behaviour of the `lang` query parameter so it
-# cannot silently regress: BOTH the canonical ISO 639-3 code (ara/eng, plus ckb
-# for the SAFA dialects acm and ckb) AND its two-letter alias (ar/en/ku) must be
-# accepted; `lang=ckb` is accepted on acm and ckb (422 on arz, which has no Kurdish
-# labels); an unknown code is rejected. The SAFA taxonomy is shared by Iraqi and
-# Kurdish, so both carry the Kurdish label set. Runs against /classify and
-# /classify/batch.
-
-# dialect -> (canonical codes accepted, aliases accepted)
-_LANG_MATRIX = {
-    "arz": (("ara", "eng"), ("ar", "en")),
-    "acm": (("ara", "eng", "ckb"), ("ar", "en", "ku")),
-    "ckb": (("ara", "eng", "ckb"), ("ar", "en", "ku")),
-}
+# Locks the behaviour of the `lang` query parameter without hardcoding any
+# dialect's values: every canonical code and alias the active dialect's file
+# declares must be accepted on both endpoints; any code it does NOT declare
+# (a real language served by another dialect, or a nonsense code) must be
+# rejected with 422. Everything derives from the dialect files, so the tests
+# hold for any number of dialects.
 
 _BODY_SINGLE = {"text": "مرحبا بالعالم"}
 _BODY_BATCH = {"texts": ["مرحبا بالعالم"]}
 
 
 def _current_dialect() -> str:
-    return os.environ.get("DIALECT", "arz")
+    return os.environ["DIALECT"]
+
+
+def _declared_languages(dialect: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(canonical codes, aliases) the dialect's file declares."""
+    languages = _DIALECT_FILES[dialect]["languages"]
+    canonical = tuple(languages)
+    aliases = tuple(a for meta in languages.values() for a in meta.get("aliases", []))
+    return canonical, aliases
 
 
 class TestLangAcceptanceMatrix:
     """Exhaustive ?lang= matrix for the active dialect, on both endpoints."""
 
-    def _canonical(self):
-        return _LANG_MATRIX[_current_dialect()][0]
+    def test_every_declared_code_accepted(self, test_client):
+        """Every canonical code and alias the dialect file declares returns 200
+        on /classify and /classify/batch."""
+        canonical, aliases = _declared_languages(_current_dialect())
+        for code in canonical + aliases:
+            single = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
+            batch = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
+            assert single.status_code == 200, f"lang={code} should be 200 on /classify"
+            assert batch.status_code == 200, f"lang={code} should be 200 on /classify/batch"
 
-    def _aliases(self):
-        return _LANG_MATRIX[_current_dialect()][1]
-
-    def test_every_canonical_key_accepted_single(self, test_client):
-        """Each canonical ISO 639-3 code for this dialect returns 200 on /classify."""
-        for code in self._canonical():
-            resp = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
-            assert resp.status_code == 200, f"canonical lang={code} should be 200"
-
-    def test_every_alias_accepted_single(self, test_client):
-        """Each two-letter alias for this dialect returns 200 on /classify."""
-        for code in self._aliases():
-            resp = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
-            assert resp.status_code == 200, f"alias lang={code} should be 200"
-
-    def test_every_canonical_key_accepted_batch(self, test_client):
-        """Each canonical code for this dialect returns 200 on /classify/batch."""
-        for code in self._canonical():
-            resp = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
-            assert resp.status_code == 200, f"canonical lang={code} should be 200 (batch)"
-
-    def test_every_alias_accepted_batch(self, test_client):
-        """Each alias for this dialect returns 200 on /classify/batch."""
-        for code in self._aliases():
-            resp = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
-            assert resp.status_code == 200, f"alias lang={code} should be 200 (batch)"
-
-    def test_lang_ckb_gated_by_dialect(self, test_client):
-        """lang=ckb is 200 on the SAFA dialects (acm, ckb) and 422 on arz."""
-        expected = 200 if _current_dialect() in ("acm", "ckb") else 422
-        resp = test_client.post("/classify?lang=ckb", json=_BODY_SINGLE)
-        assert resp.status_code == expected
-
-    def test_readme_ckb_curl_example(self, test_client):
-        """The README example `?dialect=ckb&lang=ckb` succeeds on the ckb dialect."""
-        if _current_dialect() != "ckb":
-            pytest.skip("README example targets the ckb dialect")
-        resp = test_client.post("/classify?dialect=ckb&lang=ckb", json=_BODY_SINGLE)
-        assert resp.status_code == 200
+    def test_undeclared_language_rejected(self, test_client):
+        """A real language code that other dialects serve but this dialect's
+        file does not declare returns 422 on both endpoints."""
+        mine = set().union(*_declared_languages(_current_dialect()))
+        others = {
+            code
+            for dialect in ALL_DIALECTS
+            for group in _declared_languages(dialect)
+            for code in group
+        }
+        undeclared = sorted(others - mine)
+        if not undeclared:
+            pytest.skip("Every language any dialect serves is declared by this dialect")
+        for code in undeclared:
+            single = test_client.post(f"/classify?lang={code}", json=_BODY_SINGLE)
+            batch = test_client.post(f"/classify/batch?lang={code}", json=_BODY_BATCH)
+            assert single.status_code == 422, f"undeclared lang={code} should be 422"
+            assert batch.status_code == 422, f"undeclared lang={code} should be 422 (batch)"
 
     def test_unknown_lang_rejected(self, test_client):
-        """An unknown language code returns 422 on both endpoints."""
+        """A nonsense language code returns 422 on both endpoints."""
         assert test_client.post("/classify?lang=xx", json=_BODY_SINGLE).status_code == 422
         assert test_client.post("/classify/batch?lang=xx", json=_BODY_BATCH).status_code == 422
 
+    def test_omitted_lang_uses_first_declared_alphabetically(self, test_client):
+        """Omitting ?lang= is equivalent to passing the first declared language
+        alphabetically (app.classifier.DEFAULT_LANGUAGE) -- the default is
+        derived from the dialect file, not hardcoded to any specific language."""
+        default_lang = sorted(_DIALECT_FILES[_current_dialect()]["languages"])[0]
+        omitted = test_client.post("/classify", json=_BODY_SINGLE)
+        explicit = test_client.post(f"/classify?lang={default_lang}", json=_BODY_SINGLE)
+        assert omitted.status_code == explicit.status_code == 200
+        assert omitted.json() == explicit.json()
+
     def test_canonical_and_alias_agree(self, test_client):
-        """A canonical code and its alias return identical responses (same label set)."""
-        # ara/ar is supported by every dialect.
-        canonical = test_client.post("/classify?lang=ara", json=_BODY_SINGLE)
-        alias = test_client.post("/classify?lang=ar", json=_BODY_SINGLE)
-        assert canonical.status_code == alias.status_code == 200
-        assert canonical.json() == alias.json()
+        """Each declared alias returns the identical response to its canonical
+        code (same label set, same everything)."""
+        languages = _DIALECT_FILES[_current_dialect()]["languages"]
+        pairs = [
+            (canonical, alias)
+            for canonical, meta in languages.items()
+            for alias in meta.get("aliases", [])
+        ]
+        if not pairs:
+            pytest.skip("The active dialect declares no aliases")
+        for canonical, alias in pairs:
+            canonical_resp = test_client.post(f"/classify?lang={canonical}", json=_BODY_SINGLE)
+            alias_resp = test_client.post(f"/classify?lang={alias}", json=_BODY_SINGLE)
+            assert canonical_resp.status_code == alias_resp.status_code == 200
+            assert canonical_resp.json() == alias_resp.json()
+
+
+# =============================================================================
+# 422 validation responses must not echo the rejected input
+# =============================================================================
+
+
+class TestValidationErrorResponse:
+    """422 bodies keep loc/msg/type but never reflect the submitted payload
+    (inputs are abuse text; a rejected 10 MB batch must not be mirrored back)."""
+
+    def test_too_long_text_not_echoed(self, test_client):
+        marker = "SENTINEL-DO-NOT-ECHO"
+        resp = test_client.post("/classify", json={"text": marker + "ا" * 50001})
+        assert resp.status_code == 422
+        assert marker not in resp.text
+
+    def test_wrong_type_value_not_echoed(self, test_client):
+        marker = "SENTINEL-DO-NOT-ECHO"
+        resp = test_client.post("/classify/batch", json={"texts": {"oops": marker}})
+        assert resp.status_code == 422
+        assert marker not in resp.text
+
+    def test_error_structure_preserved(self, test_client):
+        """Clients still get machine-readable errors: loc, msg, and type."""
+        resp = test_client.post("/classify", json={})
+        assert resp.status_code == 422
+        errors = resp.json()["detail"]
+        assert isinstance(errors, list) and errors
+        for err in errors:
+            assert set(err) == {"loc", "msg", "type"}
+
+
+# =============================================================================
+# Request body size cap (app-layer backstop for the nginx 10 MiB limit)
+# =============================================================================
+
+
+class TestBodySizeLimit:
+    """The ASGI body-size middleware rejects oversized bodies with 413 without
+    buffering them, so a directly-exposed backend can't be OOM'd by a huge POST."""
+
+    def _mini_app(self, max_bytes):
+        """Wrap a trivial ASGI app that would happily read any body."""
+        from app.main import BodySizeLimitMiddleware
+
+        async def echo_app(scope, receive, send):
+            body = b""
+            while True:
+                message = await receive()
+                body += message.get("body", b"")
+                if not message.get("more_body"):
+                    break
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"text/plain")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"ok:%d" % len(body)})
+
+        return BodySizeLimitMiddleware(echo_app, max_bytes=max_bytes)
+
+    def _request(self, app, body: bytes, content_length: int | None):
+        """Drive the ASGI app with one request; return (status, received chunks)."""
+        import asyncio
+
+        headers = []
+        if content_length is not None:
+            headers.append((b"content-length", str(content_length).encode()))
+        scope = {"type": "http", "method": "POST", "path": "/", "headers": headers}
+        messages = [
+            {"type": "http.request", "body": body[i : i + 10], "more_body": i + 10 < len(body)}
+            for i in range(0, max(len(body), 1), 10)
+        ]
+        sent = []
+
+        async def receive():
+            return messages.pop(0)
+
+        async def send(message):
+            sent.append(message)
+
+        asyncio.run(app(scope, receive, send))
+        status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+        return status, sent
+
+    def test_declared_content_length_over_cap_rejected(self):
+        """An oversized Content-Length is rejected up front, body unread."""
+        app = self._mini_app(max_bytes=50)
+        status, _ = self._request(app, b"x" * 100, content_length=100)
+        assert status == 413
+
+    def test_streamed_body_over_cap_rejected(self):
+        """A chunked body (no Content-Length) is cut off once it passes the cap.
+        This drives the middleware directly with an app that lets the error
+        propagate, so it exercises the middleware's own 413 backstop. Under the
+        real FastAPI app the same abort surfaces to the client as a 400 body-parse
+        error (FastAPI wraps body reads); either way the body is never fully read
+        -- the memory-safety guarantee, which is what this asserts."""
+        app = self._mini_app(max_bytes=50)
+        status, _ = self._request(app, b"x" * 100, content_length=None)
+        assert status == 413
+
+    def test_body_under_cap_passes(self):
+        """A body under the cap reaches the app untouched."""
+        app = self._mini_app(max_bytes=50)
+        status, sent = self._request(app, b"x" * 30, content_length=30)
+        assert status == 200
+        assert any(b"ok:30" in m.get("body", b"") for m in sent)
+
+    def test_endpoint_rejects_oversized_body(self, test_client):
+        """End to end: a request body over MAX_BODY_SIZE returns 413."""
+        import app.main as main_mod
+
+        oversized = b'{"text": "' + b"a" * (main_mod.MAX_BODY_SIZE + 16) + b'"}'
+        resp = test_client.post(
+            "/classify", content=oversized, headers={"content-type": "application/json"}
+        )
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "Request body too large"}

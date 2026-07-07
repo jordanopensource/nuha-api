@@ -27,12 +27,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = PROJECT_ROOT / "app"
 DIALECTS_DIR = APP_DIR / "dialects"
 
-ALL_DIALECTS = ("arz", "acm", "ckb")
-
 
 def _dialect_file(code: str) -> Path:
     """Path to a single dialect's config file."""
     return DIALECTS_DIR / f"{code}.json"
+
+
+def _load_all_dialect_files() -> dict:
+    """Load every app/dialects/<code>.json keyed by dialect code."""
+    return {
+        p.stem: json.loads(p.read_text(encoding="utf-8"))
+        for p in sorted(DIALECTS_DIR.glob("*.json"))
+    }
+
+
+# The dialect files are the single source of truth, so the test suite discovers
+# them the same way the app does: a new app/dialects/<code>.json is picked up by
+# every parametrized test (and the CI per-dialect pytest loop) with no test edit.
+# No dialect codes or dialect-specific values are hardcoded anywhere in the
+# suite; the tests validate structure and app/config wiring for WHATEVER files
+# exist, whether that is one dialect or a thousand.
+_DIALECT_FILES = _load_all_dialect_files()
+ALL_DIALECTS = tuple(_DIALECT_FILES)
+
+
+def _load_render_config():
+    """Load scripts/render_config.py by path (it lives in scripts/, not an
+    importable package, and imports only stdlib, so this has no side effects).
+    Exposed so tests can reuse its validate_dialect_config -- the single
+    definition of the dialect-file schema -- instead of re-encoding the rules."""
+    import importlib.util
+
+    path = PROJECT_ROOT / "scripts" / "render_config.py"
+    spec = importlib.util.spec_from_file_location("render_config_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+render_config = _load_render_config()
+# The one place the dialect-file schema is defined; tests assert through it.
+validate_dialect_config = render_config.validate_dialect_config
 
 
 # ---------------------------------------------------------------------------
@@ -104,77 +139,26 @@ if not getattr(_tf, "_test_patched", False):
 # ---------------------------------------------------------------------------
 # Set DIALECT before importing app code
 # ---------------------------------------------------------------------------
+# Default to the first discovered dialect (not a hardcoded code) so a bare
+# `pytest` works against whatever dialect files exist. CI and the documented
+# invocation always set DIALECT explicitly, once per dialect.
 
-os.environ.setdefault("DIALECT", "arz")
+os.environ.setdefault("DIALECT", ALL_DIALECTS[0])
 
 # ---------------------------------------------------------------------------
 # Raw data fixtures (no import of app needed)
 # ---------------------------------------------------------------------------
 
 
-def _load_all_dialect_files() -> dict:
-    """Load every app/dialects/<code>.json keyed by dialect code."""
-    return {
-        p.stem: json.loads(p.read_text(encoding="utf-8"))
-        for p in sorted(DIALECTS_DIR.glob("*.json"))
-    }
-
-
 @pytest.fixture(scope="session")
 def labels_data() -> dict:
-    """Labels keyed by dialect: {code: {sub, main, sub_to_main}}.
-
-    Reconstructed from the per-dialect files' ``labels`` blocks so existing
-    tests that expect the flat label shape keep working.
-    """
-    return {code: cfg["labels"] for code, cfg in _load_all_dialect_files().items()}
-
-
-@pytest.fixture(scope="session")
-def dialects_data() -> dict:
-    """Per-dialect config (minus labels), keyed by code under "dialects".
-
-    Reconstructed from the per-dialect files so structure tests keep working
-    against one fixture.
-    """
-    dialects = {
-        code: {k: v for k, v in cfg.items() if k != "labels"}
-        for code, cfg in _load_all_dialect_files().items()
-    }
-    return {"dialects": dialects}
+    """Labels keyed by dialect: {code: {sub, main, sub_to_main}}, from each
+    per-dialect file's ``labels`` block."""
+    return {code: cfg["labels"] for code, cfg in _DIALECT_FILES.items()}
 
 
 # ---------------------------------------------------------------------------
-# Sample texts for preprocessing tests
-# ---------------------------------------------------------------------------
-
-SAMPLE_TEXTS = {
-    "arabic_simple": "مرحبا بالعالم",
-    "arabic_long": " ".join(["كلمة"] * 50),
-    "arabic_over_50": " ".join(["كلمة"] * 51),
-    "arabic_with_emoji": "مرحبا 😊",
-    "emoji_only": "😊😂🔥",
-    "english_only": "Hello world",
-    "mixed_arabic_latin": "مرحبا hello بالعالم",
-    "empty": "",
-    "whitespace": "   ",
-    "url_text": "هذا http://example.com نص",
-    "mention_text": "هذا @user نص",
-    "hashtag_text": "#تحية مرحبا",
-    "photo_text": "[[photo]] مرحبا",
-    "leetspeak_text": "3rbi m7shi",
-    "repeated_chars": "هههههههه مرحبا",
-    "alef_variants": "إبراهيم أحمد آدم ٱلله",
-    "alef_maqsura": "على مصطفى",
-    "with_diacritics": "بِسْمِ اللَّهِ الرَّحْمَنِ",
-    "non_arabic_non_latin": "مرحبا 你好 بالعالم",
-    "short_arabic": "ا",
-    "pure_numbers": "12345",
-}
-
-
-# ---------------------------------------------------------------------------
-# Mock model fixture
+# Mock model helper
 # ---------------------------------------------------------------------------
 
 
@@ -194,12 +178,6 @@ def _make_mock_loaded_model():
     return loaded
 
 
-@pytest.fixture
-def mock_loaded_model():
-    """Provide a mock LoadedModel for tests that need it."""
-    return _make_mock_loaded_model()
-
-
 # ---------------------------------------------------------------------------
 # FastAPI TestClient fixture
 # ---------------------------------------------------------------------------
@@ -210,8 +188,8 @@ def _make_mock_predict_single(dialect: str, labels_data: dict):
     from app.classifier import ClassificationResult
 
     entry = labels_data[dialect]
-    # Labels are keyed by canonical language code (ara/eng/ckb). The API resolves
-    # any alias to its canonical code before calling, so lang is always a key here.
+    # Labels are keyed by canonical language code. The API resolves any alias to
+    # its canonical code before calling, so lang is always a key here.
     sub_maps = {lg: {int(k): v for k, v in m.items()} for lg, m in entry["sub"].items()}
     main_maps = {lg: {int(k): v for k, v in m.items()} for lg, m in entry["main"].items()}
     sub_to_main = {int(k): v for k, v in entry["sub_to_main"].items()}
@@ -248,20 +226,20 @@ def _make_mock_predict_batch(mock_single):
 def test_client(labels_data):
     """Create a FastAPI TestClient with mocked model inference.
 
-    Uses the DIALECT env var that must already be set.
+    Uses the DIALECT env var (always set: conftest defaults it at import).
     """
-    dialect = os.environ.get("DIALECT", "arz")
+    dialect = os.environ["DIALECT"]
 
     mock_single = _make_mock_predict_single(dialect, labels_data)
     mock_batch = _make_mock_predict_batch(mock_single)
 
     import app.classifier as clf
 
-    async def mock_get_classification(text, lang="ara"):
+    async def mock_get_classification(text, lang=clf.DEFAULT_LANGUAGE):
         loaded = _make_mock_loaded_model()
         return mock_single(text, loaded, clf.ACTIVE_CONFIG, lang)
 
-    async def mock_get_classifications_batch(texts, lang="ara"):
+    async def mock_get_classifications_batch(texts, lang=clf.DEFAULT_LANGUAGE):
         loaded = _make_mock_loaded_model()
         return mock_batch(texts, loaded, clf.ACTIVE_CONFIG, lang)
 

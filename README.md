@@ -107,19 +107,26 @@ docker compose up -d
 The API is then on port 8000 (change it with `PORT` in `.env`). The proxy waits
 for all three backends to report healthy before it accepts traffic.
 
-Compose tags the images it builds `nuha-api:arz`, `nuha-api:acm`, and
-`nuha-api:ckb`. To run images from a registry instead of building locally, set
-`NUHA_IMAGE_PREFIX` to the repository path; Compose appends `:<code>` per
-dialect. For the JOSA registry, where CI publishes the per-dialect images:
+Compose tags the images it builds locally `nuha-api:arz`, `nuha-api:acm`, and
+`nuha-api:ckb`. To run CI-published images from a registry instead, set
+`NUHA_IMAGE_PREFIX` to the repository path AND pick a release channel with
+`NUHA_IMAGE_TAG_SUFFIX`; Compose assembles `<prefix>:<code><suffix>` per
+dialect. For the JOSA registry:
 
 ```bash
-NUHA_IMAGE_PREFIX=registry.cloud.josa.ngo/library/nuha-api docker compose up -d
+NUHA_IMAGE_PREFIX=registry.cloud.josa.ngo/library/nuha-api \
+NUHA_IMAGE_TAG_SUFFIX=-stable docker compose up -d
 ```
 
-That resolves to `…/nuha-api:arz`, `…/nuha-api:acm`, and `…/nuha-api:ckb`. CI
-also pushes channel- and commit-pinned tags per dialect (`arz-latest`,
-`arz-stable`, `arz-stable-<sha>`, and so on) for rollback; pin a specific tag by
-setting the image directly in your own override file.
+That resolves to `…/nuha-api:arz-stable`, `…/nuha-api:acm-stable`, and
+`…/nuha-api:ckb-stable` — images built from `main` after the full CI gate
+(lint, lockfile check, per-dialect tests). Use `NUHA_IMAGE_TAG_SUFFIX=-latest`
+to track branch builds on a staging box. Every tag carries an explicit channel:
+CI publishes `<code>-stable[-<sha>]` from `main` and `<code>-latest[-<sha>]`
+from other branches, and deliberately no bare `<code>` tag — so a deploy always
+states which channel it follows, and a work-in-progress branch push can never
+overwrite what production pulls. The `-<sha>` tags are immutable pins for
+rollback; use one directly in an override file to freeze a deployment.
 
 ### One dialect in a single container
 
@@ -131,12 +138,13 @@ was built for, so a bare run works.
 ```bash
 docker run -p 8000:8000 nuha-api:arz
 
-# An image from the registry, with a couple of overrides:
+# An image from the registry (tags always carry a channel: -stable or -latest),
+# with a couple of overrides:
 docker run -p 8000:8000 \
   -e DIALECT=acm \
   -e LOG_LEVEL=DEBUG \
   -e CLASSIFIER_WORKERS=2 \
-  registry.cloud.josa.ngo/library/nuha-api:acm
+  registry.cloud.josa.ngo/library/nuha-api:acm-stable
 ```
 
 ### Locally for development
@@ -164,19 +172,35 @@ needs. If your models live somewhere else, point `MODEL_PATH` at the directory.
 
 ### Tests
 
-The tests mock the ML imports, so you do not need the models present to run them.
-`DIALECT` is still required because the app reads it at import time.
+The tests mock the ML imports, so you do not need the models present to run
+them. The suite hardcodes no dialect values: dialect-file tests validate
+structure (required fields with sane types, a well-formed `hf_repo` id,
+consistent label maps, and that the app's own loader accepts every file), and
+API tests check that each instance serves exactly what its dialect file
+declares. Everything is discovered from `app/dialects/*.json`, so the same
+tests pass unchanged whether that directory holds one file or fifty, and a new
+dialect is covered without touching the tests. `DIALECT` selects the instance
+under test (it defaults to the first discovered dialect if unset).
 
 ```bash
 pip install -r requirements-test.txt
 
-DIALECT=arz pytest    # 277 passed, a few skipped
-DIALECT=acm  pytest    # 275 passed, a few skipped
-DIALECT=ckb pytest    # 276 passed, a few skipped
+# Run the suite once per dialect (all pass; a few skip when HuggingFace is
+# unreachable or a check does not apply to that dialect):
+DIALECT=arz pytest
+DIALECT=acm pytest
+DIALECT=ckb pytest
 ```
 
-Egyptian (`arz`) has only Arabic and English labels, so it skips the Kurdish
-`lang=ckb` cases; the SAFA dialects (Iraqi and Kurdish) both serve Kurdish labels.
+The suite also verifies, for every dialect, that its `hf_repo` actually exists,
+is public, and ships an ONNX graph (`tests/test_dialect_models.py`). That is the
+one part that reaches the network; it runs by default and is a real gate (a
+missing/private/non-ONNX repo fails), and it skips *only* if HuggingFace is
+unreachable, so a transient outage never turns a build red. A skip otherwise
+means a test's precondition doesn't apply to that dialect (e.g. rejecting a
+language no other dialect serves either). CI runs this suite once per dialect
+(the `run-tests` step in both Woodpecker pipelines) before any image is built,
+so a failing test blocks every image push.
 
 ## The API
 
@@ -186,7 +210,11 @@ Egyptian (`arz`) has only Arabic and English labels, so it skips the Kurdish
 | `POST` | `/classify`       | Classify one text           |
 | `POST` | `/classify/batch` | Classify a list of texts    |
 
-Interactive docs are at `/docs` (Swagger UI) and `/redoc` when the stack is up.
+Interactive docs (`/docs`, `/redoc`, `/openapi.json`) ship DISABLED: `.env`
+sets `DISABLE_DOCS=1` by default, since the docs are the one unauthenticated
+path that isn't classification traffic. To serve them, remove (or comment out)
+the `DISABLE_DOCS=1` line in your `.env` and restart; the proxy already routes
+and rate-limits the docs paths.
 
 ### Query parameters
 
@@ -196,9 +224,11 @@ Both classify endpoints take the same two query parameters.
   pick the backend. Each backend also checks it: if you send a `dialect` that
   does not match the container, you get a 422. Leave it off and the request goes
   to the default dialect (Egyptian).
-- **`lang`** defaults to `ar`. It sets the language of the labels in the
-  response, not which model runs. It is `ar`, `en`, or `ckb`. `ckb` is valid on
-  the SAFA dialects (Iraqi and Kurdish); ask for it on Egyptian and you get a 422.
+- **`lang`** sets the language of the labels in the response, not which model
+  runs. It is `ar`, `en`, or `ckb`. `ckb` is valid on the SAFA dialects (Iraqi
+  and Kurdish); ask for it on Egyptian and you get a 422. If you omit it, the
+  default is the first language the dialect declares alphabetically, which is
+  Arabic for every shipped dialect.
 
 ### Request and response shapes
 
@@ -285,7 +315,9 @@ The status codes you can get:
 |------|----------------------------------------------------------------------------|
 | 200  | Success                                                                     |
 | 400  | The proxy received an unknown `dialect` value                               |
+| 413  | Request body over the size cap (`MAX_BODY_SIZE` / nginx `client_max_body_size`) |
 | 422  | Bad input, a `dialect` that does not match the backend, or an invalid `lang`|
+| 429  | Too many requests: a per-client or per-peer rate limit was exceeded at the proxy |
 | 500  | An unexpected error (the body is generic, no stack trace leaks)            |
 | 503  | Overloaded: every slot is busy, the short queue is full, or a queued request waited too long |
 | 504  | An inference ran past `INFERENCE_TIMEOUT`, which means something is wrong   |
@@ -311,20 +343,25 @@ Anything dialect-specific (memory limit, replica count) is in
 | `ORT_INTRA_OP_THREADS`| `1`                   | ONNX Runtime threads per inference. Keep at 1 (see Deployment notes).         |
 | `INFERENCE_TIMEOUT`  | `120`                  | Per-request inference timeout in seconds. A safety backstop, not a tuning knob.|
 | `MAX_BATCH_SIZE`     | `1000`                 | Most texts allowed in one batch request.                                      |
+| `MAX_BODY_SIZE`      | `10485760`             | App-layer request body cap in bytes (10 MiB); oversized bodies get a 413. Keep in sync with nginx `client_max_body_size`. |
 | `CACHE_SIZE`         | `1024`                 | LRU capacity of the prediction cache. 0 disables it.                          |
 | `EXPOSE_CACHE_STATS` | *(off)*                | If set, `/health` includes cache hit and miss stats. Off so it leaks nothing. |
-| `DISABLE_DOCS`       | *(off)*                | If set, turns off `/docs`, `/redoc`, and `/openapi.json`.                     |
+| `DISABLE_DOCS`       | *(set in `.env`)*      | If set, turns off `/docs`, `/redoc`, and `/openapi.json`. The shipped `.env` sets it; remove the line to serve docs. |
 | `LOG_LEVEL`          | `INFO`                 | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.                           |
 | `LOG_FORMAT`         | `text`                 | `text` for humans, `json` for log aggregation.                               |
 | `HOST`               | `0.0.0.0`              | Bind address.                                                                 |
 | `PORT`               | `8000`                 | Port the proxy publishes.                                                     |
-| `WORKERS`            | `1`                    | Uvicorn worker processes. Keep at 1 (see Deployment notes).                   |
 | `TIMEOUT`            | `120`                  | Uvicorn keep-alive timeout in seconds. Not a request timeout.                 |
 
-A couple of proxy-only variables: `DEFAULT_DIALECT` (default `arz`) is the
-dialect the proxy uses for no-dialect requests and for the docs pages.
+A couple of compose-level variables: `DEFAULT_DIALECT` is the dialect the proxy
+uses for no-dialect requests and for the docs pages. Its compose fallback is
+derived from the dialect files (`arz` when present, otherwise the first dialect
+alphabetically), so it stays valid even if `arz` is removed; override it to pin
+a different default.
 `NUHA_IMAGE_PREFIX` (default `nuha-api`) is the repository prefix for the
-per-dialect backend images; Compose appends `:<code>` to it. `BACKEND_CPU_LIMIT`,
+per-dialect backend images and `NUHA_IMAGE_TAG_SUFFIX` (default empty) is the
+release channel appended after the dialect code — empty for local builds,
+`-stable` or `-latest` for registry images (see Running it). `BACKEND_CPU_LIMIT`,
 `PROXY_CPU_LIMIT`, `PROXY_MEM_LIMIT`, and `BACKEND_MEM_RESERVATION` set Compose
 resource caps.
 
@@ -335,7 +372,14 @@ resource caps.
 nginx terminates client connections and routes by dialect. It also:
 
 - Rate limits per IP: 100 requests a second to `/classify`, 20 a second to
-  `/classify/batch`, since batches are heavier. Over the limit gets a 429.
+  `/classify/batch`, since batches are heavier. Over the limit gets a 429. The
+  per-IP buckets key on the client IP recovered from `X-Forwarded-For` when the
+  connection comes from a trusted private range (so a fronting proxy or LB gets
+  per-client limits, not one shared bucket). Because that header is
+  client-supplied, a second set of zones caps each connection *peer* at 30x the
+  per-client rate: a legitimate proxy carrying many clients fits comfortably,
+  while a host spoofing a fresh `X-Forwarded-For` per request is bounded instead
+  of unlimited. The docs paths get their own modest limit (10 r/s).
 - Sets `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
 - Serves its own `/health` with a 200 instead of proxying to a backend.
 - Serves the docs from the default dialect's backend, since docs do not depend on
@@ -390,10 +434,13 @@ backstop for something genuinely stuck, not a tuning knob, so set it well above
 your worst-case batch time. A full 1000-text batch is a single inference that can
 take tens of seconds on a 2-CPU cap, and the default 120s leaves wide margin.
 
-Keep `WORKERS` (uvicorn processes) at 1. The model forward pass releases the GIL,
-so one process already saturates the CPU the container has. A second worker is a
-full copy of the model in memory for no throughput gain. Scale with replicas, not
-workers.
+Uvicorn worker processes are fixed at 1 in the image entrypoint (there is no
+`WORKERS` variable). The model forward pass releases the GIL, so one process
+already saturates the CPU the container has; a second worker would be a full
+copy of the model in memory for no throughput gain. One model instance serves
+`CLASSIFIER_WORKERS` requests concurrently — raise that (with
+`BACKEND_CPU_LIMIT`) for more simultaneity per container, and scale with
+replicas beyond that.
 
 ### Memory
 
@@ -571,9 +618,14 @@ pre-commit run --all-files          # optional, run on everything once
 
 The hooks cover Ruff (Python lint and format), YAML and TOML syntax, trailing
 whitespace and merge markers, secret detection (Gitleaks), and Conventional
-Commit messages. The `render-config` hook keeps `compose.yml` and the nginx
-routing in step with the dialect files, and `run-samplr` keeps `.sample.env` in
-step with `.env`.
+Commit messages. The `render-config` hook keeps `compose.yml`, the nginx
+routing, and the `.woodpecker` pipelines in step with the dialect files; it also
+validates each dialect file structurally first (required fields and types, a
+well-formed `hf_repo` id, label/language consistency, a sound `sub_to_main`
+mapping) and rejects the commit with a clear message if one is broken, so a bad
+dialect file is caught at commit time rather than in CI. `run-samplr` keeps
+`.sample.env` in step with `.env`. (The tests remain the full gate and run in
+CI; the hook's check is the fast structural subset that needs no dependencies.)
 
 ## Backward compatibility
 
@@ -582,8 +634,9 @@ The API stays compatible with the existing frontend:
 - A request with no `dialect` routes to Egyptian.
 - The response schema is unchanged: `is_valid`, `sub_class`, `main_class`,
   `confidence`.
-- The original status codes (200, 422) behave the same. The new codes (400, 500,
-  503, 504) are additions.
+- The original status codes (200, 422) behave the same. The new codes (400, 413,
+  500, 503, 504) are additions. 422 bodies keep their `detail` list shape but no
+  longer echo the rejected input value back.
 
 ## Next steps
 
