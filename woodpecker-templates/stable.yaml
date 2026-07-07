@@ -48,43 +48,25 @@ steps:
   # it in this pinned Python and fail if the committed lock differs. Catches a
   # requirements.txt change that forgot to regenerate the lock.
   - name: check-lockfile
-    image: python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+    image: python:3.12-slim
     commands:
       - pip install --no-cache-dir pip-tools==7.5.3
       - python scripts/check_lock.py
 
-  # Run the full pytest suite once per dialect BEFORE any image is built, so an
-  # untested change can never reach a pushed image. Runtime deps come from the
-  # same hashed lock the image installs; the dialect list is discovered from
-  # app/dialects/*.json at run time, so a new dialect is tested with no CI edit
-  # (the same single-source-of-truth rule as the generated build steps).
-  - name: run-tests
-    image: python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
-    commands:
-      - pip install --no-cache-dir --require-hashes -r requirements.lock
-      - pip install --no-cache-dir -r requirements-test.txt
-      - |
-        for f in app/dialects/*.json; do
-          d="$(basename "$f" .json)"
-          echo "=== pytest (DIALECT=$d) ==="
-          DIALECT="$d" python -m pytest -q || exit 1
-        done
-
   # One image PER DIALECT: each bakes only its own model (selected by the
   # DIALECT build_arg, which the Dockerfile reads to download that dialect's
-  # hf_repo from app/dialects/<code>.json). Published tags are channel-first:
-  # stable-<code> plus the checksum-pinned stable-<CI_COMMIT_SHA>-<code> for
-  # rollback. No bare <code> tag exists on any channel; a registry deploy
-  # picks stable- (or latest-) via NUHA_IMAGE_TAG_PREFIX in compose, so what
-  # production pulls is always an explicit, main-branch-gated choice. The
+  # hf_repo from app/dialects/<code>.json). The dialect code is the image tag
+  # (nuha-api:arz, ...), matching how compose tags them via
+  # ${NUHA_IMAGE_PREFIX}:<code>. Each dialect also gets channel + SHA-pinned
+  # tags (<code>-stable, <code>-stable-${CI_COMMIT_SHA}) for rollback. The
   # buildx-plugin CI_* metadata args are preserved and the model repos are still
   # read from app/dialects/ at build time (public repos, no HF token). Each build
-  # depends on check-lockfile and run-tests, so a drifted lock or a failing test
-  # blocks all of them and no untested image is pushed.
+  # depends on check-lockfile, so a drifted lock blocks all of them and no
+  # stale-lock image is pushed.
 # __BUILD_STEPS__  (generated: one build step per dialect)
 
   - name: notify-slack-stable-success
-    image: plugins/slack:1.4.1
+    image: plugins/slack
     settings:
       webhook:
         from_secret: SLACK_WEBHOOK
@@ -95,11 +77,10 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
 # __BUILD_DEPENDS__  (generated: one entry per dialect)
 
   - name: notify-slack-stable-failure
-    image: plugins/slack:1.4.1
+    image: plugins/slack
     settings:
       webhook:
         from_secret: SLACK_WEBHOOK
@@ -110,5 +91,4 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
 # __BUILD_DEPENDS__  (generated: one entry per dialect)

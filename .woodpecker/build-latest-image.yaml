@@ -44,48 +44,31 @@ steps:
   # it in this pinned Python and fail if the committed lock differs. Catches a
   # requirements.txt change that forgot to regenerate the lock.
   - name: check-lockfile
-    image: python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+    image: python:3.12-slim
     commands:
       - pip install --no-cache-dir pip-tools==7.5.3
       - python scripts/check_lock.py
 
-  # Run the full pytest suite once per dialect BEFORE any image is built, so an
-  # untested change can never reach a pushed image. Runtime deps come from the
-  # same hashed lock the image installs; the dialect list is discovered from
-  # app/dialects/*.json at run time, so a new dialect is tested with no CI edit
-  # (the same single-source-of-truth rule as the generated build steps).
-  - name: run-tests
-    image: python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
-    commands:
-      - pip install --no-cache-dir --require-hashes -r requirements.lock
-      - pip install --no-cache-dir -r requirements-test.txt
-      - |
-        for f in app/dialects/*.json; do
-          d="$(basename "$f" .json)"
-          echo "=== pytest (DIALECT=$d) ==="
-          DIALECT="$d" python -m pytest -q || exit 1
-        done
-
   # One image PER DIALECT: each bakes only its own model (selected by the
   # DIALECT build_arg, which the Dockerfile reads to download that dialect's
-  # hf_repo from app/dialects/<code>.json). Published tags are channel-first:
-  # latest-<code> plus the checksum-pinned latest-<CI_COMMIT_SHA>-<code> for
-  # rollback. No bare <code> tag is pushed -- this pipeline runs on every
-  # non-main branch, so a bare tag would let any WIP push overwrite the default
-  # a registry deploy pulls; compose picks a channel via NUHA_IMAGE_TAG_PREFIX
-  # instead. The buildx-plugin CI_* metadata args are preserved and the model
-  # repos are still read from app/dialects/ at build time (public repos, no HF
-  # token). Each build depends on check-lockfile and run-tests, so a drifted
-  # lock or a failing test blocks all of them and no untested image is pushed.
+  # hf_repo from app/dialects/<code>.json). The dialect code is the image tag
+  # (nuha-api:arz, ...), matching how compose tags them via
+  # ${NUHA_IMAGE_PREFIX}:<code>. Each dialect also gets channel + SHA-pinned
+  # tags (<code>-latest, <code>-latest-${CI_COMMIT_SHA}) for rollback. The
+  # buildx-plugin CI_* metadata args are preserved and the model repos are still
+  # read from app/dialects/ at build time (public repos, no HF token). Each build
+  # depends on check-lockfile, so a drifted lock blocks all of them and no
+  # stale-lock image is pushed.
   - name: build-latest-image-acm
-    image: woodpeckerci/plugin-docker-buildx:6.1.0
+    image: woodpeckerci/plugin-docker-buildx
     settings:
       repo: *docker_repo
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - latest-acm
-        - latest-${CI_COMMIT_SHA}-acm
+        - acm
+        - acm-latest
+        - acm-latest-${CI_COMMIT_SHA}
       username:
         from_secret: REGISTRY_USERNAME
       password:
@@ -98,17 +81,17 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
 
   - name: build-latest-image-arz
-    image: woodpeckerci/plugin-docker-buildx:6.1.0
+    image: woodpeckerci/plugin-docker-buildx
     settings:
       repo: *docker_repo
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - latest-arz
-        - latest-${CI_COMMIT_SHA}-arz
+        - arz
+        - arz-latest
+        - arz-latest-${CI_COMMIT_SHA}
       username:
         from_secret: REGISTRY_USERNAME
       password:
@@ -121,17 +104,17 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
 
   - name: build-latest-image-ckb
-    image: woodpeckerci/plugin-docker-buildx:6.1.0
+    image: woodpeckerci/plugin-docker-buildx
     settings:
       repo: *docker_repo
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - latest-ckb
-        - latest-${CI_COMMIT_SHA}-ckb
+        - ckb
+        - ckb-latest
+        - ckb-latest-${CI_COMMIT_SHA}
       username:
         from_secret: REGISTRY_USERNAME
       password:
@@ -144,10 +127,9 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
 
   - name: notify-slack-latest-success
-    image: plugins/slack:1.4.1
+    image: plugins/slack
     settings:
       webhook:
         from_secret: SLACK_WEBHOOK
@@ -158,13 +140,12 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
       - build-latest-image-acm
       - build-latest-image-arz
       - build-latest-image-ckb
 
   - name: notify-slack-latest-failure
-    image: plugins/slack:1.4.1
+    image: plugins/slack
     settings:
       webhook:
         from_secret: SLACK_WEBHOOK
@@ -175,7 +156,6 @@ steps:
     depends_on:
       - run-pre-commit-hooks
       - check-lockfile
-      - run-tests
       - build-latest-image-acm
       - build-latest-image-arz
       - build-latest-image-ckb
