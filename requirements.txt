@@ -15,7 +15,7 @@ uvicorn[standard]>=0.32.0,<1.0.0
 
 # Machine Learning
 onnxruntime>=1.18.0,<2.0.0
-transformers==5.2.0
+transformers==5.5.0
 
 # Text Processing
 emoji>=2.0.0,<3.0.0
