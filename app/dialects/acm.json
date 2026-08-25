@@ -20,8 +20,6 @@
     "leetspeak": true,
     "alef_maqsura": true
   },
-  "mem_limit": "4g",
-  "replicas": 1,
   "labels": {
     "sub": {
       "ara": {
