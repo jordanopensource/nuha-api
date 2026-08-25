@@ -14,8 +14,6 @@
   "preprocessing": {
     "type": "nuha"
   },
-  "mem_limit": "4g",
-  "replicas": 1,
   "labels": {
     "sub": {
       "ara": {
