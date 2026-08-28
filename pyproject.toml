@@ -1,9 +1,9 @@
 [tool.pytest.ini_options]
+# One suite, one run: a bare `pytest` covers every dialect and every layer (the
+# ML stack is mocked by tests/conftest.py, so no model files or DIALECT-style
+# env vars are needed). CI runs exactly this.
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --strict-markers"
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
