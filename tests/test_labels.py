@@ -2,14 +2,15 @@
 
 The dialect-file SCHEMA (required fields, well-formed hf_repo, label/language
 consistency, sub_to_main integrity, digit keys, ...) is defined in ONE place:
-`validate_dialect_config` in scripts/render_config.py (the commit-time gate).
-These tests assert the shipped files pass that validator rather than
-re-encoding the rules a second time; `test_render_validation.py` proves the
-validator's logic itself. What remains here is what the validator deliberately
-does NOT cover: that the APP can actually parse and load every file
-(_parse_dialect, _build_preprocess_fn, the preprocessing registry) and the
-directory-level invariants. Everything parametrizes over whatever files exist,
-so it holds for one dialect file or a thousand.
+`validate_dialect_config` in app/common/dialect_schema.py (the commit-time,
+install-time, and load-time gate). These tests assert the shipped files pass
+that validator rather than re-encoding the rules a second time;
+`test_dialect_schema.py` proves the validator's logic itself. What remains here
+is what the validator deliberately does NOT cover: that the APP can actually
+parse and load every file (_parse_dialect, _build_preprocess_fn, the
+preprocessing registry) and the directory-level invariants. Everything
+parametrizes over whatever files exist, so it holds for one dialect file or a
+thousand.
 """
 
 import json
@@ -29,8 +30,8 @@ class TestDialectFilesValid:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_passes_schema_validator(self, dialect):
-        """The file has no structural problems per validate_dialect_config —
-        the same check the render-config pre-commit hook runs. This covers
+        """The file has no structural problems per validate_dialect_config,
+        the same check the validate-dialects pre-commit hook runs. This covers
         required fields and types, hf_repo shape, languages, label/language
         consistency, digit keys, non-empty label strings, and sub_to_main
         integrity, all from one definition."""
@@ -51,7 +52,9 @@ class TestParseDialect:
     def _import_parser(self):
         from app.classifier import _parse_dialect
 
-        self._parse_dialect = _parse_dialect
+        self._parse_dialect = lambda code: _parse_dialect(
+            json.loads(_dialect_file(code).read_text(encoding="utf-8"))
+        )
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_produces_int_keys(self, dialect):
@@ -69,14 +72,14 @@ class TestParseDialect:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_contains_expected_keys(self, dialect):
-        """_parse_dialect() returns exactly the keys ACTIVE_CONFIG expects."""
+        """_parse_dialect() returns exactly the keys DialectConfig expects."""
         parsed = self._parse_dialect(dialect)
         assert set(parsed.keys()) == {"sub_to_main", "sub_labels", "main_labels"}
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_parsed_languages_match_file(self, dialect):
         """The parsed label groups carry exactly the languages the file's labels
-        block carries -- nothing dropped, nothing invented."""
+        block carries: nothing dropped, nothing invented."""
         parsed = self._parse_dialect(dialect)
         raw = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))["labels"]
         assert set(parsed["sub_labels"]) == set(raw["sub"])
@@ -112,9 +115,9 @@ class TestDialectAppIntegration:
 
     @pytest.mark.parametrize("dialect", ALL_DIALECTS)
     def test_default_language_is_serviceable(self, dialect):
-        """The API default lang (first declared language alphabetically,
-        app/classifier.DEFAULT_LANGUAGE) has both sub and main labels, so a
-        request that omits lang always succeeds -- no dialect must declare a
+        """The app's default lang (the first declared language alphabetically,
+        LoadedDialect.default_language) has both sub and main labels, so a
+        request that omits lang always succeeds; no dialect must declare a
         specific language."""
         cfg = json.loads(_dialect_file(dialect).read_text(encoding="utf-8"))
         default_lang = sorted(cfg["languages"])[0]
@@ -142,7 +145,7 @@ class TestDialectsDirectory:
 
     def test_every_json_file_parses_to_an_object(self):
         """Every *.json in the directory is valid JSON and a dict (a broken file
-        would crash the app's _load_dialects_config at import)."""
+        would keep its own dialect out of the registry)."""
         for path in sorted(DIALECTS_DIR.glob("*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -153,7 +156,7 @@ class TestDialectsDirectory:
     def test_discovered_dialects_match_directory(self):
         """conftest's ALL_DIALECTS is exactly the set of *.json stems, and each
         stem is a plausible dialect code (lowercase letters, no path junk) that
-        the app, nginx routing, and image tags can all use verbatim."""
+        routing, the models volume, and the fetch command can all use verbatim."""
         stems = {p.stem for p in DIALECTS_DIR.glob("*.json")}
         assert set(ALL_DIALECTS) == stems
         for code in stems:
@@ -162,24 +165,18 @@ class TestDialectsDirectory:
             )
 
     def test_app_loads_every_dialect(self):
-        """The app's own loader accepts every file on disk: the ground truth
-        that a passing suite implies the API boots for each dialect, whoever
-        added the file. Mirrors _load_dialects_config + the per-dialect
-        DialectConfig assembly (_parse_dialect + _build_preprocess_fn)."""
-        from app.classifier import (
-            DialectConfig,
-            _build_preprocess_fn,
-            _load_dialects_config,
-            _parse_dialect,
-        )
+        """The app's own config path accepts every file on disk: the ground
+        truth that a passing suite implies the startup scan loads each dialect,
+        whoever added the file. (Sibling isolation, the "a broken file fails
+        only its own dialect" property, is asserted at scan level in
+        test_registry.py.) Mirrors the load path pieces the registry runs per
+        directory (_parse_dialect + _build_preprocess_fn)."""
+        from app.classifier import DialectConfig, _build_preprocess_fn, _parse_dialect
 
-        config = _load_dialects_config()
-        assert set(config) == set(ALL_DIALECTS)
-        for code, cfg in config.items():
-            parsed = _parse_dialect(code)
+        for code in ALL_DIALECTS:
+            cfg = json.loads(_dialect_file(code).read_text(encoding="utf-8"))
             DialectConfig(
                 name=cfg["name"],
-                model_path=f"./models/{code}",
                 preprocess_fn=_build_preprocess_fn(cfg["preprocessing"]),
-                **parsed,
+                **_parse_dialect(cfg),
             )  # must construct without raising

@@ -1,43 +1,73 @@
-"""Tests for classifier module logic.
+"""Tests for the classification engine.
 
-Tests the configuration, executor management, inference cache, label
-selection, and error handling in the classifier module -- all with
-mocked models (no ML framework dependency).
+Directory parsing, executor management, the admission gate, the inference
+cache, label selection, and error handling, all with mocked models (no ML
+framework dependency). Per-dialect state lives on ``LoadedDialect`` bundles
+now, so these tests build entries via ``_make_entry`` with the fabricated
+code "tst" (no dialect file declares it, keeping the suite's
+no-hardcoded-dialects rule intact).
 """
 
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
 
+from tests.conftest import ALL_DIALECTS, make_model_volume
+
 
 # =============================================================================
-# ACTIVE_CONFIG tests
+# parse_dialect_dir: a model directory becomes a complete DialectConfig
 # =============================================================================
 
 
-class TestActiveConfig:
-    """ACTIVE_CONFIG is fully assembled for the active dialect at import."""
+class TestParseDialectDir:
+    """parse_dialect_dir assembles the full per-dialect config from a model
+    directory (the registry's completeness check), for whatever dialect files
+    exist; broken directories raise instead of half-loading."""
 
-    def test_active_config_complete(self):
-        """Every field is populated: name, model_path, preprocess_fn, labels,
-        and sub_to_main (key parsing itself is covered by TestParseDialect)."""
-        from app.classifier import ACTIVE_CONFIG, DIALECT
+    @pytest.mark.parametrize("code", ALL_DIALECTS)
+    def test_builds_complete_config(self, tmp_path, code):
+        from app.classifier import parse_dialect_dir
 
-        assert ACTIVE_CONFIG.name
-        assert ACTIVE_CONFIG.model_path
-        assert callable(ACTIVE_CONFIG.preprocess_fn)
-        assert ACTIVE_CONFIG.sub_to_main
-        # Every language group carries labels (whatever languages the file declares).
-        assert ACTIVE_CONFIG.sub_labels
-        assert ACTIVE_CONFIG.main_labels
-        for lang_map in (*ACTIVE_CONFIG.sub_labels.values(), *ACTIVE_CONFIG.main_labels.values()):
+        volume = make_model_volume(tmp_path / "models", codes=(code,))
+        cfg, config, onnx_path = parse_dialect_dir(code, volume / code)
+        assert config.name == cfg["name"]
+        assert callable(config.preprocess_fn)
+        assert config.sub_to_main
+        assert config.sub_labels and config.main_labels
+        for lang_map in (*config.sub_labels.values(), *config.main_labels.values()):
             assert lang_map
-        # MODEL_PATH defaults to ./models/{DIALECT} when the env var is not set.
-        if not os.getenv("MODEL_PATH"):
-            assert ACTIVE_CONFIG.model_path == f"./models/{DIALECT}"
+        assert onnx_path == volume / code / "model.onnx"
+
+    def test_schema_problems_raise(self, tmp_path, any_dialect):
+        import json
+
+        from app.classifier import parse_dialect_dir
+
+        volume = make_model_volume(tmp_path / "models", codes=(any_dialect,))
+        path = volume / any_dialect / "dialect.json"
+        cfg = json.loads(path.read_text())
+        del cfg["labels"]
+        path.write_text(json.dumps(cfg))
+        with pytest.raises(RuntimeError, match="Invalid dialect config"):
+            parse_dialect_dir(any_dialect, volume / any_dialect)
+
+    def test_unknown_preprocessing_type_raises(self, tmp_path, any_dialect):
+        """The schema deliberately does not know the preprocessor registry; the
+        engine's own build step is what rejects an unknown type."""
+        import json
+
+        from app.classifier import parse_dialect_dir
+
+        volume = make_model_volume(tmp_path / "models", codes=(any_dialect,))
+        path = volume / any_dialect / "dialect.json"
+        cfg = json.loads(path.read_text())
+        cfg["preprocessing"] = {"type": "no-such-preprocessor"}
+        path.write_text(json.dumps(cfg))
+        with pytest.raises(RuntimeError, match="Unknown preprocessing type"):
+            parse_dialect_dir(any_dialect, volume / any_dialect)
 
 
 # =============================================================================
@@ -444,60 +474,39 @@ class TestInferenceCache:
 
 
 # =============================================================================
-# VALID_DIALECTS and SUPPORTED_LANGUAGES
+# Language maps
 # =============================================================================
 
 
-class TestDialectAndLanguageConfig:
-    """Tests for dialect and language configuration constants."""
+class TestBuildLanguageMaps:
+    """build_language_maps derives (supported, default, aliases) from a
+    dialect's languages block, checked against every shipped dialect file."""
 
-    def test_valid_dialects_matches_dialect_files(self):
-        """VALID_DIALECTS is exactly the set of app/dialects/<code>.json files."""
-        from app.classifier import VALID_DIALECTS
-        from tests.conftest import ALL_DIALECTS
-
-        assert VALID_DIALECTS == set(ALL_DIALECTS)
-
-    def test_supported_languages_match_dialect_file(self):
-        """SUPPORTED_LANGUAGES is exactly the language set the active dialect's
-        file declares -- the app serves what the config says, no more, no less."""
-        from app.classifier import DIALECT, SUPPORTED_LANGUAGES
+    @pytest.mark.parametrize("code", ALL_DIALECTS)
+    def test_maps_mirror_the_dialect_file(self, code):
+        from app.classifier import build_language_maps
         from tests.conftest import _DIALECT_FILES
 
-        assert SUPPORTED_LANGUAGES == set(_DIALECT_FILES[DIALECT]["languages"])
-
-
-# =============================================================================
-# Language alias normalization
-# =============================================================================
-
-
-class TestNormalizeLang:
-    """normalize_lang maps the active dialect's aliases to canonical ISO 639-3 codes."""
-
-    def test_every_declared_alias_resolves_to_its_canonical(self):
-        """Each alias the active dialect's file declares resolves to the
-        canonical code it is declared under."""
-        from app.classifier import DIALECT, normalize_lang
-        from tests.conftest import _DIALECT_FILES
-
-        for canonical, meta in _DIALECT_FILES[DIALECT]["languages"].items():
+        languages = _DIALECT_FILES[code]["languages"]
+        supported, default, aliases = build_language_maps(languages)
+        assert supported == frozenset(languages)
+        assert default == sorted(languages)[0]
+        for canonical, meta in languages.items():
             for alias in meta.get("aliases", []):
-                assert normalize_lang(alias) == canonical
+                assert aliases[alias] == canonical
 
-    def test_canonical_passes_through(self):
-        """Every declared canonical code passes through unchanged."""
-        from app.classifier import DIALECT, normalize_lang
-        from tests.conftest import _DIALECT_FILES
+    def test_canonical_codes_not_in_alias_map(self):
+        """Canonical codes pass through lookups unchanged because they are NOT
+        alias keys; an unknown code passes through too, so the caller still
+        validates against the supported set."""
+        from app.classifier import build_language_maps
 
-        for canonical in _DIALECT_FILES[DIALECT]["languages"]:
-            assert normalize_lang(canonical) == canonical
-
-    def test_unknown_passes_through(self):
-        """An unsupported code is returned unchanged so the caller can reject it."""
-        from app.classifier import normalize_lang
-
-        assert normalize_lang("not-a-lang") == "not-a-lang"
+        _supported, _default, aliases = build_language_maps(
+            {"aaa": {"name": "A", "aliases": ["a"]}, "bbb": {"name": "B"}}
+        )
+        assert aliases == {"a": "aaa"}
+        assert aliases.get("aaa", "aaa") == "aaa"
+        assert aliases.get("zz", "zz") == "zz"
 
 
 # =============================================================================
@@ -523,7 +532,6 @@ class TestDataclassImmutability:
 
         cfg = DialectConfig(
             name="Test",
-            model_path="/test",
             preprocess_fn=lambda x: x,
             sub_to_main={0: 0},
             sub_labels={"ar": {0: "test"}},
@@ -539,7 +547,9 @@ class TestDataclassImmutability:
 
 
 class TestPredictSingleLabelLogic:
-    """Tests for _predict_single label lookup logic with mocked inference."""
+    """_predict_single's invalid-input short circuit (empty/whitespace input
+    never reaches the model). The label-lookup happy path is covered with a
+    fake session in TestPredictWithFakeSession."""
 
     def _make_cfg(self):
         """Build a minimal DialectConfig for testing."""
@@ -547,7 +557,6 @@ class TestPredictSingleLabelLogic:
 
         return DialectConfig(
             name="test",
-            model_path="/test",
             preprocess_fn=lambda x: x if x.strip() else "",
             sub_to_main={0: 0, 1: 1},
             sub_labels={
@@ -566,18 +575,16 @@ class TestPredictSingleLabelLogic:
         """Empty preprocessed text returns is_valid=False."""
         from app.classifier import _predict_single
 
-        cfg = self._make_cfg()
-        mock_loaded = MagicMock()
-        result = _predict_single("", mock_loaded, cfg, "ar")
+        entry = _make_entry(self._make_cfg(), MagicMock())
+        result = _predict_single("", entry, "ar")
         assert result.is_valid is False
 
     def test_whitespace_only_returns_invalid(self):
         """Whitespace-only text returns is_valid=False after preprocessing."""
         from app.classifier import _predict_single
 
-        cfg = self._make_cfg()
-        mock_loaded = MagicMock()
-        result = _predict_single("   ", mock_loaded, cfg, "ar")
+        entry = _make_entry(self._make_cfg(), MagicMock())
+        result = _predict_single("   ", entry, "ar")
         assert result.is_valid is False
 
 
@@ -646,6 +653,65 @@ def _make_loaded(session, input_names=("input_ids", "attention_mask"), max_lengt
     )
 
 
+def _make_entry(cfg, loaded, code="tst"):
+    """Wrap a config + loaded model into a LoadedDialect bundle with a fresh
+    per-entry cache and tokenizer lock. "tst" is a fabricated code no dialect
+    file declares, keeping the suite's no-hardcoded-dialects rule intact."""
+    from pathlib import Path
+
+    from app.classifier import InferenceCache, LoadedDialect
+
+    supported = frozenset(cfg.sub_labels)
+    return LoadedDialect(
+        code=code,
+        path=Path("/nonexistent"),
+        config=cfg,
+        loaded=loaded,
+        supported_languages=supported,
+        default_language=sorted(supported)[0],
+        aliases={},
+        cache=InferenceCache(64),
+        tokenizer_lock=threading.Lock(),
+    )
+
+
+class TestFindOnnxFile:
+    """_find_onnx_file: locate the single ONNX graph in a model dir. Pure
+    filesystem logic; reached in production only via the patched-out load_model,
+    so its selection + error paths are pinned directly here."""
+
+    def test_prefers_model_onnx(self, tmp_path):
+        from app.classifier import _find_onnx_file
+
+        (tmp_path / "model.onnx").write_bytes(b"")
+        (tmp_path / "other_export.onnx").write_bytes(b"")
+        assert _find_onnx_file(tmp_path) == tmp_path / "model.onnx"
+
+    def test_falls_back_to_single_onnx(self, tmp_path):
+        from app.classifier import _find_onnx_file
+
+        (tmp_path / "export.onnx").write_bytes(b"")
+        assert _find_onnx_file(tmp_path) == tmp_path / "export.onnx"
+
+    def test_raises_when_none(self, tmp_path):
+        import pytest
+
+        from app.classifier import _find_onnx_file
+
+        with pytest.raises(RuntimeError, match="No ONNX model"):
+            _find_onnx_file(tmp_path)
+
+    def test_raises_when_ambiguous(self, tmp_path):
+        import pytest
+
+        from app.classifier import _find_onnx_file
+
+        (tmp_path / "a.onnx").write_bytes(b"")
+        (tmp_path / "b.onnx").write_bytes(b"")
+        with pytest.raises(RuntimeError, match="Multiple"):
+            _find_onnx_file(tmp_path)
+
+
 class TestSoftmaxArgmax:
     """_softmax_argmax: numerically-stable row-wise softmax + argmax."""
 
@@ -658,18 +724,20 @@ class TestSoftmaxArgmax:
         assert int(pred[0]) == 1
         assert 0.0 <= float(conf[0]) <= 1.0
 
-    def test_probabilities_sum_to_one(self):
+    def test_top_probability_matches_hand_computed_value(self):
+        """Independent oracle: the top softmax probability is a constant computed
+        by hand, so a bug in the function's own softmax lines (wrong axis, no
+        max-subtraction) cannot silently reproduce the expected value and pass.
+        For logits [2, 1, 0.5, -1] the denominator is
+        exp(0)+exp(-1)+exp(-1.5)+exp(-3) = 1.640797, so the top prob (class 0)
+        is 1/1.640797 = 0.609460."""
         import numpy as np
 
         from app.classifier import _softmax_argmax
 
-        logits = np.array([[2.0, 1.0, 0.5, -1.0]])
-        shifted = logits - np.max(logits, axis=-1, keepdims=True)
-        exp = np.exp(shifted)
-        probs = exp / np.sum(exp, axis=-1, keepdims=True)
-        assert abs(float(probs.sum()) - 1.0) < 1e-6
-        conf, _ = _softmax_argmax(logits)
-        assert abs(float(conf[0]) - float(probs.max())) < 1e-6
+        conf, pred = _softmax_argmax(np.array([[2.0, 1.0, 0.5, -1.0]]))
+        assert int(pred[0]) == 0
+        assert abs(float(conf[0]) - 0.609460) < 1e-5
 
     def test_stable_with_large_logits(self):
         """Large logits do not overflow (stable softmax subtracts the row max)."""
@@ -792,7 +860,6 @@ class TestTokenTypeIdsRequest:
 
         return DialectConfig(
             name="bert-test",
-            model_path="/test",
             preprocess_fn=lambda x: x.strip(),
             sub_to_main={0: 0, 1: 1},
             sub_labels={"ara": {0: "neutral", 1: "violence"}},
@@ -800,31 +867,29 @@ class TestTokenTypeIdsRequest:
         )
 
     def test_single_feeds_token_type_ids_to_bert_graph(self):
-        from app.classifier import _inference_cache, _predict_single
+        from app.classifier import _predict_single
 
-        _inference_cache._cache.clear()
         session = _FakeSession(
             [[0.1, 9.0]], input_names=("input_ids", "attention_mask", "token_type_ids")
         )
-        loaded = self._bert_loaded(session)
-        result = _predict_single("نص عربي", loaded, self._cfg(), "ara")
+        entry = _make_entry(self._cfg(), self._bert_loaded(session))
+        result = _predict_single("نص عربي", entry, "ara")
         assert result.is_valid is True
         assert result.sub_class == "violence"
         # The fed dict reaching the session must carry token_type_ids.
         assert "token_type_ids" in session.calls[0]
 
     def test_batch_feeds_token_type_ids_to_bert_graph(self):
-        from app.classifier import _inference_cache, _predict_batch
+        from app.classifier import _predict_batch
 
-        _inference_cache._cache.clear()
         # Two distinct texts => two cache misses => the fake session must return
         # two logit rows (it slices [:n] by the input row count).
         session = _FakeSession(
             [[0.1, 9.0], [0.1, 9.0]],
             input_names=("input_ids", "attention_mask", "token_type_ids"),
         )
-        loaded = self._bert_loaded(session)
-        results = _predict_batch(["نص اول", "نص ثاني"], loaded, self._cfg(), "ara")
+        entry = _make_entry(self._cfg(), self._bert_loaded(session))
+        results = _predict_batch(["نص اول", "نص ثاني"], entry, "ara")
         assert all(r.is_valid for r in results)
         assert "token_type_ids" in session.calls[0]
 
@@ -837,7 +902,6 @@ class TestPredictWithFakeSession:
 
         return DialectConfig(
             name="test",
-            model_path="/test",
             preprocess_fn=lambda x: x.strip(),
             sub_to_main={0: 0, 1: 1},
             sub_labels={"ara": {0: "neutral", 1: "violence"}},
@@ -845,55 +909,66 @@ class TestPredictWithFakeSession:
         )
 
     def test_single_prediction_uses_argmax_label(self):
-        from app.classifier import _inference_cache, _predict_single
+        from app.classifier import _predict_single
 
-        _inference_cache._cache.clear()
         # logits favour class 1
-        loaded = _make_loaded(_FakeSession([[0.1, 9.0]]))
-        result = _predict_single("نص عربي", loaded, self._cfg(), "ara")
+        entry = _make_entry(self._cfg(), _make_loaded(_FakeSession([[0.1, 9.0]])))
+        result = _predict_single("نص عربي", entry, "ara")
         assert result.is_valid is True
         assert result.sub_class == "violence"
         assert result.main_class == "violence_m"
         assert 0.0 <= result.confidence <= 1.0
 
     def test_single_prediction_caches_raw_prediction(self):
-        from app.classifier import _inference_cache, _predict_single
+        from app.classifier import _predict_single
 
-        _inference_cache._cache.clear()
         session = _FakeSession([[0.1, 9.0]])
-        loaded = _make_loaded(session)
-        cfg = self._cfg()
-        _predict_single("نص عربي", loaded, cfg, "ara")
-        # Second call with same text must hit the cache (no second run()).
-        _predict_single("نص عربي", loaded, cfg, "ara")
+        entry = _make_entry(self._cfg(), _make_loaded(session))
+        _predict_single("نص عربي", entry, "ara")
+        # Second call with same text must hit the entry's cache (no second run()).
+        _predict_single("نص عربي", entry, "ara")
         assert len(session.calls) == 1
-        cached = _inference_cache.get("نص عربي")
+        cached = entry.cache.get("نص عربي")
         assert cached is not None
         assert cached[0] == 1  # predicted_id stored
 
     def test_batch_only_runs_inference_on_cache_misses(self):
-        from app.classifier import _inference_cache, _predict_batch
+        from app.classifier import _predict_batch
 
-        _inference_cache._cache.clear()
         session = _FakeSession([[0.1, 9.0]])
-        loaded = _make_loaded(session)
-        cfg = self._cfg()
-        # Prime the cache with one of the two texts.
-        _inference_cache.put("repeat", (1, 0.99))
-        results = _predict_batch(["repeat", "fresh"], loaded, cfg, "ara")
+        entry = _make_entry(self._cfg(), _make_loaded(session))
+        # Prime the entry's cache with one of the two texts.
+        entry.cache.put("repeat", (1, 0.99))
+        results = _predict_batch(["repeat", "fresh"], entry, "ara")
         assert all(r.is_valid for r in results)
         # Only the single miss ("fresh") was sent to the session.
         assert len(session.calls) == 1
         assert len(next(iter(session.calls[0].values()))) == 1
 
     def test_batch_empty_and_valid_mix(self):
-        from app.classifier import _inference_cache, _predict_batch
+        from app.classifier import _predict_batch
 
-        _inference_cache._cache.clear()
-        loaded = _make_loaded(_FakeSession([[0.1, 9.0]]))
-        results = _predict_batch(["", "نص"], loaded, self._cfg(), "ara")
+        entry = _make_entry(self._cfg(), _make_loaded(_FakeSession([[0.1, 9.0]])))
+        results = _predict_batch(["", "نص"], entry, "ara")
         assert results[0].is_valid is False
         assert results[1].is_valid is True
+
+    def test_same_text_on_two_entries_never_shares_a_cache(self):
+        """Behavioral isolation: caching a text on one dialect must not answer
+        another dialect's request for the same text (keys are preprocessed
+        text only, so a shared cache would cross-serve predictions)."""
+        from app.classifier import _predict_single
+
+        session_a, session_b = _FakeSession([[0.1, 9.0]]), _FakeSession([[9.0, 0.1]])
+        entry_a = _make_entry(self._cfg(), _make_loaded(session_a), code="tst")
+        entry_b = _make_entry(self._cfg(), _make_loaded(session_b), code="tsu")
+        _predict_single("نص مشترك", entry_a, "ara")
+        result_b = _predict_single("نص مشترك", entry_b, "ara")
+        # B ran its OWN inference (no cross-entry cache hit) and got its own
+        # session's answer, not A's cached one.
+        assert len(session_a.calls) == 1
+        assert len(session_b.calls) == 1
+        assert result_b.sub_class == "neutral"
 
 
 class TestTokenizerSerialization:
@@ -904,8 +979,8 @@ class TestTokenizerSerialization:
     path (padding=True) calling it from two pool threads at once is the
     "RuntimeError: Already borrowed" race (huggingface/tokenizers#537).
     _predict_single/_predict_batch must never be inside the tokenizer
-    concurrently (the _TOKENIZER_LOCK in classifier.py). Inference itself
-    stays parallel; only tokenization is serialized.
+    concurrently (the per-dialect tokenizer_lock on LoadedDialect). Inference
+    itself stays parallel; only tokenization is serialized.
     """
 
     def test_concurrent_single_and_batch_never_overlap_in_tokenizer(self):
@@ -917,12 +992,9 @@ class TestTokenizerSerialization:
         from app.classifier import (
             DialectConfig,
             LoadedModel,
-            _inference_cache,
             _predict_batch,
             _predict_single,
         )
-
-        _inference_cache._cache.clear()
 
         counter_lock = threading.Lock()
         in_tokenizer = 0
@@ -952,18 +1024,18 @@ class TestTokenizerSerialization:
         )
         cfg = DialectConfig(
             name="test",
-            model_path="/test",
             preprocess_fn=lambda x: x.strip(),
             sub_to_main={0: 0, 1: 1},
             sub_labels={"ara": {0: "neutral", 1: "violence"}},
             main_labels={"ara": {0: "neutral_m", 1: "violence_m"}},
         )
 
+        entry = _make_entry(cfg, loaded)
         errors = []
 
         def run(fn, arg):
             try:
-                fn(arg, loaded, cfg, "ara")
+                fn(arg, entry, "ara")
             except Exception as e:  # the race would surface as an exception here
                 errors.append(e)
 
@@ -982,5 +1054,123 @@ class TestTokenizerSerialization:
         assert not errors, f"prediction raised under concurrency: {errors}"
         assert max_concurrent == 1, (
             f"{max_concurrent} threads were inside the tokenizer at once; "
-            f"tokenization must be serialized (see _TOKENIZER_LOCK)"
+            f"tokenization must be serialized (see LoadedDialect.tokenizer_lock)"
+        )
+
+
+# =============================================================================
+# check_label_consistency: refuse a mis-packaged model directory at load
+# =============================================================================
+
+
+class TestLabelConsistencyCheck:
+    """check_label_consistency fails a dialect's load when the ONNX graph's
+    output width disagrees with its declared label taxonomy, catching a
+    mis-packaged model directory before a single silently-wrong label."""
+
+    def _loaded_with_width(self, width):
+        """A LoadedModel-shaped mock whose ONNX graph declares `width` output
+        classes (or a symbolic dim if width is a str)."""
+        out = MagicMock()
+        out.shape = [None, width]
+        loaded = MagicMock()
+        loaded.session.get_outputs.return_value = [out]
+        return loaded
+
+    def test_matching_width_passes(self):
+        from app.classifier import check_label_consistency
+
+        # Must not raise when the graph width equals the declared taxonomy size.
+        check_label_consistency(self._loaded_with_width(6), 6, "tst")
+
+    def test_mismatched_width_fails_fast(self):
+        from app.classifier import check_label_consistency
+
+        with pytest.raises(RuntimeError, match="mis-packaged"):
+            check_label_consistency(self._loaded_with_width(7), 6, "tst")
+
+    def test_symbolic_width_is_skipped(self):
+        """When the graph leaves the last logits dim symbolic, the check can't
+        compare and must NOT raise (some exports are dynamic)."""
+        from app.classifier import check_label_consistency
+
+        check_label_consistency(self._loaded_with_width("num_labels"), 6, "tst")
+
+
+# =============================================================================
+# The async entry points, executed for real (gate + executor + predict)
+# =============================================================================
+
+
+class TestAsyncEntryPoints:
+    """get_classification / get_classifications_batch run the full path: the
+    admission gate, the thread pool, and the real predict functions."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_executor_global(self):
+        yield
+        import app.classifier as clf
+
+        clf.shutdown_executor()
+
+    def _entry(self, logits):
+        cfg_holder = TestPredictWithFakeSession()
+        return _make_entry(cfg_holder._cfg(), _make_loaded(_FakeSession(logits)))
+
+    def test_single_returns_a_labeled_result(self):
+        import asyncio
+
+        from app.classifier import get_classification
+
+        entry = self._entry([[0.1, 9.0]])
+        result = asyncio.run(get_classification(entry, "نص عربي", "ara"))
+        assert result.is_valid is True
+        assert result.sub_class == "violence"
+        assert 0.0 <= result.confidence <= 1.0
+
+    def test_batch_returns_results_in_order(self):
+        import asyncio
+
+        from app.classifier import get_classifications_batch
+
+        entry = self._entry([[0.1, 9.0], [0.1, 9.0]])
+        results = asyncio.run(get_classifications_batch(entry, ["نص اول", "", "نص ثاني"], "ara"))
+        assert [r.is_valid for r in results] == [True, False, True]
+
+
+# =============================================================================
+# _load_model metadata handling: the snapshot's max_length is clamped
+# =============================================================================
+
+
+class TestLoadModelMetadata:
+    """training_config.json is model-repo DATA: its max_length is honored only
+    when it is a sane integer, so a hostile or corrupt snapshot cannot inflate
+    per-request tokenizer allocations."""
+
+    def _load(self, tmp_path, training_config=None):
+        import json as _json
+
+        from app.classifier import _load_model
+
+        (tmp_path / "model.onnx").write_bytes(b"")
+        if training_config is not None:
+            (tmp_path / "training_config.json").write_text(_json.dumps(training_config))
+        return _load_model(tmp_path, tmp_path / "model.onnx")
+
+    def test_missing_config_defaults_to_128(self, tmp_path):
+        assert self._load(tmp_path).max_length == 128
+
+    def test_sane_value_is_honored(self, tmp_path):
+        assert self._load(tmp_path, {"max_length": 256}).max_length == 256
+
+    @pytest.mark.parametrize("bad", [10**9, 0, -5, "512", True, None, 4097])
+    def test_out_of_bounds_or_non_int_falls_back_to_128(self, tmp_path, bad):
+        assert self._load(tmp_path, {"max_length": bad}).max_length == 128
+
+    def test_upper_bound_is_inclusive(self, tmp_path):
+        from app.classifier import _MAX_TOKENIZER_LEN
+
+        assert self._load(tmp_path, {"max_length": _MAX_TOKENIZER_LEN}).max_length == (
+            _MAX_TOKENIZER_LEN
         )

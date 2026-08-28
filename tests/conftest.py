@@ -1,26 +1,38 @@
-"""Shared fixtures for the Nuha API test suite.
+"""Root fixtures for the Nuha test suite.
 
-app/classifier.py imports onnxruntime (for inference) and AutoTokenizer from
-transformers. The test suite runs without the real onnxruntime wheel or any
-model files, so we inject mocks for the ML stack BEFORE any app code is imported
-(onnxruntime is always mocked; transformers' deep import chain can fail on some
-hosts due to missing native libs like libprotobuf, so we mock the breaking
-sub-modules and the tokenizer/model classes too).
+One service, one suite, one pytest run: the ML mocks install here at import,
+before anything touches ``app`` (the suite runs with no onnxruntime wheel and
+no model files). Dialect discovery stays the single source of truth pattern:
+``app/dialects/*.json`` is read the same way the fetch command does, no dialect
+code or dialect-specific value is hardcoded anywhere, and the app-level
+fixtures build a throwaway models VOLUME from those same files, so the tests
+exercise the real startup scan against real configs with only the model load
+mocked out.
 """
 
-import contextlib
 import json
-import os
-import sys
+import shutil
+from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
+from tests._ml_mock import install_ml_mocks
+
+
+# Mock the ML stack BEFORE any app import below.
+install_ml_mocks()
+
+from app.common.dialect_schema import validate_dialect_config  # noqa: E402,F401
+
+
+# The one place the dialect-file schema is defined; tests assert through it
+# (re-exported so test modules import it from one seam).
+
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths and discovery
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -42,111 +54,16 @@ def _load_all_dialect_files() -> dict:
 
 
 # The dialect files are the single source of truth, so the test suite discovers
-# them the same way the app does: a new app/dialects/<code>.json is picked up by
-# every parametrized test (and the CI per-dialect pytest loop) with no test edit.
-# No dialect codes or dialect-specific values are hardcoded anywhere in the
-# suite; the tests validate structure and app/config wiring for WHATEVER files
-# exist, whether that is one dialect or a thousand.
+# them the same way the fetch command does: a new app/dialects/<code>.json is
+# picked up by every parametrized test with no test edit. No dialect codes or
+# dialect-specific values are hardcoded anywhere in the suite; the tests
+# validate structure and wiring for WHATEVER files exist.
 _DIALECT_FILES = _load_all_dialect_files()
 ALL_DIALECTS = tuple(_DIALECT_FILES)
 
 
-def _load_render_config():
-    """Load scripts/render_config.py by path (it lives in scripts/, not an
-    importable package, and imports only stdlib, so this has no side effects).
-    Exposed so tests can reuse its validate_dialect_config -- the single
-    definition of the dialect-file schema -- instead of re-encoding the rules."""
-    import importlib.util
-
-    path = PROJECT_ROOT / "scripts" / "render_config.py"
-    spec = importlib.util.spec_from_file_location("render_config_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-render_config = _load_render_config()
-# The one place the dialect-file schema is defined; tests assert through it.
-validate_dialect_config = render_config.validate_dialect_config
-
-
 # ---------------------------------------------------------------------------
-# Mock the ML stack before app code is imported
-# ---------------------------------------------------------------------------
-# app/classifier.py imports `onnxruntime` (inference) and, from transformers,
-# `AutoTokenizer`. Tests must run without the real onnxruntime wheel or any model
-# files, so we inject a MagicMock for `onnxruntime` here, before classifier is
-# imported. (numpy is a real, lightweight dependency and is used as-is.)
-#
-# transformers' top-level package uses lazy imports (__getattr__). When
-# classifier.py does `from transformers import AutoTokenizer`, it can trigger a
-# deep import chain (modeling_auto -> auto_factory -> generation -> sklearn ->
-# pyarrow -> libprotobuf.so) that fails on some hosts. We pre-inject mock modules
-# for that chain so the real import never reaches pyarrow, and make AutoTokenizer
-# resolve to a MagicMock. If transformers is not installed at all, we mock the
-# top-level package too so the suite still runs (it never does real inference).
-
-# onnxruntime is always mocked: no native runtime needed for contract/logic tests.
-_saved_onnxruntime = sys.modules.get("onnxruntime")
-sys.modules["onnxruntime"] = MagicMock()
-
-_MODULES_TO_MOCK = [
-    "transformers.models.auto.modeling_auto",
-    "transformers.models.auto.auto_factory",
-    "transformers.generation",
-    "transformers.generation.utils",
-    "transformers.generation.candidate_generator",
-]
-
-_saved_modules: dict[str, ModuleType | None] = {}
-
-for _mod_name in _MODULES_TO_MOCK:
-    _saved_modules[_mod_name] = sys.modules.get(_mod_name)
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
-
-# Make `from transformers import AutoTokenizer` work. Prefer the real lazy
-# package (so its __getattr__ can be patched); if it isn't installed, fall back
-# to a fully mocked top-level module.
-try:
-    import transformers as _tf
-except Exception:  # transformers not installed on this host
-    _tf = MagicMock()
-    sys.modules["transformers"] = _tf
-
-if not getattr(_tf, "_test_patched", False):
-    _orig_getattr = getattr(type(_tf), "__getattr__", None)
-
-    def _safe_getattr(self, name):
-        """Return a MagicMock for tokenizer/model classes instead of triggering deep imports."""
-        if name in (
-            "AutoTokenizer",
-            "PreTrainedModel",
-            "PreTrainedTokenizer",
-            "PreTrainedTokenizerFast",
-        ):
-            return MagicMock()
-        if _orig_getattr is not None:
-            return _orig_getattr(self, name)
-        raise AttributeError(name)
-
-    # MagicMock instances accept attribute assignment but have no settable
-    # __getattr__ on the type; guard so the real-package path still patches.
-    with contextlib.suppress(TypeError, AttributeError):
-        type(_tf).__getattr__ = _safe_getattr
-    _tf._test_patched = True
-
-# ---------------------------------------------------------------------------
-# Set DIALECT before importing app code
-# ---------------------------------------------------------------------------
-# Default to the first discovered dialect (not a hardcoded code) so a bare
-# `pytest` works against whatever dialect files exist. CI and the documented
-# invocation always set DIALECT explicitly, once per dialect.
-
-os.environ.setdefault("DIALECT", ALL_DIALECTS[0])
-
-# ---------------------------------------------------------------------------
-# Raw data fixtures (no import of app needed)
+# Raw data fixtures (no app import needed)
 # ---------------------------------------------------------------------------
 
 
@@ -158,18 +75,29 @@ def labels_data() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Mock model helper
+# Model-volume builder (what the fetch command produces, minus the real model)
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_loaded_model():
-    """Create a mock LoadedModel matching the ONNX-runtime field shape.
+def make_model_volume(root: Path, codes=ALL_DIALECTS) -> Path:
+    """Build a models directory shaped like a fetch-populated volume.
 
-    The real LoadedModel holds an ORT ``session`` plus the tokenizer, the set of
-    input names the graph expects, and ``max_length``. Prediction is mocked at a
-    higher level (``_make_mock_predict_single``), so the session never actually
-    runs here; this just mirrors the dataclass fields.
+    Per code: the repo dialect file installed as dialect.json, a dummy
+    model.onnx (the load itself is mocked), and a training_config.json. The
+    structure is derived from the real files, nothing hardcoded.
     """
+    root.mkdir(parents=True, exist_ok=True)
+    for code in codes:
+        d = root / code
+        d.mkdir()
+        shutil.copyfile(_dialect_file(code), d / "dialect.json")
+        (d / "model.onnx").write_bytes(b"not a real onnx graph")
+        (d / "training_config.json").write_text(json.dumps({"max_length": 128}))
+    return root
+
+
+def mock_loaded_model():
+    """A mock LoadedModel matching the ONNX-runtime field shape."""
     loaded = MagicMock()
     loaded.session = MagicMock()
     loaded.tokenizer = MagicMock()
@@ -178,83 +106,122 @@ def _make_mock_loaded_model():
     return loaded
 
 
+@pytest.fixture
+def patched_model_load(monkeypatch):
+    """Replace only the ML half of a dialect load with a mock.
+
+    ``parse_dialect_dir`` (dialect.json parsing, schema validation, ONNX-file
+    resolution) stays REAL, so the registry tests exercise the actual
+    completeness rules; ``_load_model`` (tokenizer + ORT session) is the only
+    mocked seam.
+    """
+    import app.classifier as clf
+
+    monkeypatch.setattr(clf, "_load_model", lambda path, onnx_path: mock_loaded_model())
+
+
+@pytest.fixture(autouse=True)
+def registry_reset():
+    """Every test starts and ends with an empty registry."""
+    from app import registry
+
+    registry.reset()
+    yield
+    registry.reset()
+
+
 # ---------------------------------------------------------------------------
-# FastAPI TestClient fixture
+# The app harness: the real app booted against a throwaway volume
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_predict_single(dialect: str, labels_data: dict):
-    """Build a mock _predict_single that uses real label data."""
+class ApiHarness:
+    """The booted app plus the seams the tests poke.
+
+    ``calls`` records every (dialect code, payload, lang) the mocked engine
+    received, so routing tests can assert WHICH dialect served a request
+    without hardcoding label strings. ``fail(exc)`` makes the next engine call
+    raise, for the 503/504/500 surface.
+    """
+
+    def __init__(self, client) -> None:
+        self.client = client
+        self.calls: list[tuple[str, object, str]] = []
+        self._raise: Exception | None = None
+
+    def fail(self, exc: Exception) -> None:
+        self._raise = exc
+
+
+@pytest.fixture
+def api_factory(tmp_path, monkeypatch, labels_data):
+    """Boot the real app (lifespan + startup scan) against a built volume.
+
+    A context manager factory so restart-pickup tests can boot, change the
+    volume, and boot again: two boots ARE the operator's restart. Only
+    ``_load_model`` and the two engine entry points are mocked; the scan,
+    schema validation, lang resolution, and routing all run for real.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.classifier as clf
+    import app.main as app_main
+    from app import registry
     from app.classifier import ClassificationResult
 
-    entry = labels_data[dialect]
-    # Labels are keyed by canonical language code. The API resolves any alias to
-    # its canonical code before calling, so lang is always a key here.
-    sub_maps = {lg: {int(k): v for k, v in m.items()} for lg, m in entry["sub"].items()}
-    main_maps = {lg: {int(k): v for k, v in m.items()} for lg, m in entry["main"].items()}
-    sub_to_main = {int(k): v for k, v in entry["sub_to_main"].items()}
-
-    def mock_predict(text, loaded, cfg, lang):
-        cleaned = cfg.preprocess_fn(text)
+    def _result_for(harness: ApiHarness, entry, text: str, lang: str):
+        if harness._raise is not None:
+            raise harness._raise
+        cleaned = entry.config.preprocess_fn(text)
         if not cleaned:
             return ClassificationResult(
                 is_valid=False, sub_class=None, main_class=None, confidence=None
             )
-        pred_id = 0
-        conf = 0.95
-        sub_l, main_l = sub_maps[lang], main_maps[lang]
+        # Real label tables for the entry's dialect; the route resolved lang to
+        # a canonical code, so it is always a key here.
+        labels = labels_data[entry.code]
+        sub = {int(k): v for k, v in labels["sub"][lang].items()}
+        main = {int(k): v for k, v in labels["main"][lang].items()}
+        s2m = {int(k): v for k, v in labels["sub_to_main"].items()}
         return ClassificationResult(
-            is_valid=True,
-            sub_class=sub_l[pred_id],
-            main_class=main_l[sub_to_main[pred_id]],
-            confidence=round(conf, 4),
+            is_valid=True, sub_class=sub[0], main_class=main[s2m[0]], confidence=0.95
         )
 
-    return mock_predict
+    @contextmanager
+    def boot(codes=ALL_DIALECTS, volume: Path | None = None):
+        vol = volume if volume is not None else make_model_volume(tmp_path / "models", codes)
+        monkeypatch.setattr(registry, "MODELS_DIR", vol)
+        monkeypatch.setattr(clf, "_load_model", lambda path, onnx_path: mock_loaded_model())
 
+        harness_box: list[ApiHarness] = []
 
-def _make_mock_predict_batch(mock_single):
-    """Build a mock _predict_batch from a mock _predict_single."""
+        async def fake_single(entry, text, lang):
+            harness_box[0].calls.append((entry.code, text, lang))
+            return _result_for(harness_box[0], entry, text, lang)
 
-    def mock_batch(texts, loaded, cfg, lang):
-        return [mock_single(t, loaded, cfg, lang) for t in texts]
+        async def fake_batch(entry, texts, lang):
+            harness_box[0].calls.append((entry.code, list(texts), lang))
+            return [_result_for(harness_box[0], entry, t, lang) for t in texts]
 
-    return mock_batch
+        monkeypatch.setattr(app_main, "get_classification", fake_single)
+        monkeypatch.setattr(app_main, "get_classifications_batch", fake_batch)
+
+        with TestClient(app_main.app, raise_server_exceptions=False) as client:
+            harness = ApiHarness(client)
+            harness_box.append(harness)
+            yield harness
+
+    return boot
 
 
 @pytest.fixture
-def test_client(labels_data):
-    """Create a FastAPI TestClient with mocked model inference.
+def api(api_factory):
+    """The default harness: every repo dialect installed on the volume."""
+    with api_factory() as harness:
+        yield harness
 
-    Uses the DIALECT env var (always set: conftest defaults it at import).
-    """
-    dialect = os.environ["DIALECT"]
 
-    mock_single = _make_mock_predict_single(dialect, labels_data)
-    mock_batch = _make_mock_predict_batch(mock_single)
-
-    import app.classifier as clf
-
-    async def mock_get_classification(text, lang=clf.DEFAULT_LANGUAGE):
-        loaded = _make_mock_loaded_model()
-        return mock_single(text, loaded, clf.ACTIVE_CONFIG, lang)
-
-    async def mock_get_classifications_batch(texts, lang=clf.DEFAULT_LANGUAGE):
-        loaded = _make_mock_loaded_model()
-        return mock_batch(texts, loaded, clf.ACTIVE_CONFIG, lang)
-
-    with (
-        patch("app.classifier.load_model", return_value=_make_mock_loaded_model()),
-        patch("app.main.load_model", return_value=_make_mock_loaded_model()),
-        patch("app.main.get_classification", side_effect=mock_get_classification),
-        patch(
-            "app.main.get_classifications_batch",
-            side_effect=mock_get_classifications_batch,
-        ),
-    ):
-        from fastapi.testclient import TestClient
-
-        from app.main import app
-
-        with TestClient(app, raise_server_exceptions=False) as client:
-            yield client
+@pytest.fixture
+def any_dialect() -> str:
+    """One valid dialect code, chosen positionally (never hardcoded)."""
+    return sorted(ALL_DIALECTS)[0]

@@ -1,16 +1,15 @@
 """Tests for text preprocessing.
 
 Pure functions, no mocking. Every preprocessor is obtained exactly the way the
-app builds it -- ``_build_preprocess_fn`` applied to each dialect file's
-``preprocessing`` config -- so the tests exercise the configurations that
+app builds it: ``_build_preprocess_fn`` applied to each dialect file's
+``preprocessing`` config, so the tests exercise the configurations that
 actually ship and stay correct as dialect files are added or removed. Nothing
 here imports a specific preprocessor or names a dialect: the universal contract
 is checked against every discovered config, and family-specific behaviour is
 keyed off the ``preprocessing.type`` declared in the files (data, not a
 hardcoded family).
 
-Note: conftest.py mocks the heavy ML imports and sets DIALECT before these
-imports occur.
+Note: conftest.py mocks the heavy ML imports before these imports occur.
 """
 
 import pytest
@@ -65,7 +64,7 @@ def _configs_declaring(flag):
 
 
 # =============================================================================
-# Universal contract -- must hold for every preprocessor, whatever type/flags
+# Universal contract: must hold for every preprocessor, whatever type/flags
 # =============================================================================
 
 
@@ -95,7 +94,7 @@ class TestPreprocessingContract:
     def test_word_guard_short_circuits_before_expensive_work(self, preprocess, prep):
         """The >50-word guard fires cheaply on a pathological many-token input
         (what an attacker would send to burn CPU) instead of running the full
-        pipeline -- this bounds per-request CPU so a huge body can't tie up an
+        pipeline; this bounds per-request CPU so a huge body can't tie up an
         inference slot."""
         pathological = "a3 " * 20000  # 20k arabizi-shaped tokens, far over 50 words
         # The >50-word guard rejects this pathological many-token input up front,
@@ -104,13 +103,13 @@ class TestPreprocessingContract:
 
 
 # =============================================================================
-# Family-specific behaviour -- keyed off the discovered preprocessing.type
+# Family-specific behaviour: keyed off the discovered preprocessing.type
 # =============================================================================
 #
 # Keys are matched against the `preprocessing.type` values found in the dialect
 # files (data, not a hardcoded family list). A type that ships but is missing
 # here fails loudly (a new family must state its expected behaviour); a type
-# listed here but not shipped simply never runs. Each check is
+# listed here but not shipped never runs. Each check is
 # (label, input, predicate-on-output).
 
 _TYPE_BEHAVIOURS = {
@@ -190,7 +189,7 @@ def test_type_specific_behaviour(prep_type):
 
 
 # =============================================================================
-# Optional preprocessing flags -- exercised for whichever configs declare them
+# Optional preprocessing flags: exercised for whichever configs declare them
 # =============================================================================
 
 
