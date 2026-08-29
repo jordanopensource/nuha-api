@@ -4,7 +4,6 @@
 
 # CI/CD
 .woodpecker/
-woodpecker-templates/
 
 # Python
 __pycache__/
@@ -42,6 +41,7 @@ docs/
 Dockerfile*
 compose.yml
 compose.yaml
+compose.dev.yml
 .docker/
 
 # Environment and config files (not needed in container)
@@ -56,12 +56,13 @@ compose.yaml
 .yamllint
 LICENSE
 
-# Nginx config (mounted by proxy container, not needed in app image)
-nginx.conf
+# Development tooling (not needed in container), EXCEPT the two scripts the
+# image ships: the fetch service's installer and the schema-validation CLI.
+scripts/*
+!scripts/fetch_models.py
+!scripts/validate_dialects.py
 
-# Development tooling (not needed in container)
-scripts/
-
-# Local model directories (models are downloaded fresh during build)
+# Local model directories (models never enter the image; they live on the
+# models volume, installed by the fetch service)
 model/
 models/
