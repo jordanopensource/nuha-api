@@ -8,12 +8,13 @@ fails when someone edits requirements.txt without regenerating the lock, but doe
 not nag just because a new upstream release landed within an allowed range.
 
 The compare ignores comments and blank lines, because pip-compile rewrites the
-header and the `# via` notes while the meaningful content (the index URL, the
-pinned versions, and the hashes) is what must match.
+header and the `# via` notes while the meaningful content (the pinned versions
+and their hashes) is what must match.
 
-I pass --no-strip-extras and pin pip-tools to match how requirements.lock was
-generated. pip-tools 8 flips the --strip-extras default, which would otherwise
-rewrite the lock here and trip a false drift.
+I pass --no-strip-extras to match how requirements.lock was generated;
+pip-tools itself is pinned by whoever runs this (the CI step and the local
+command below), because pip-tools 8 flips the --strip-extras default, which
+would otherwise rewrite the lock here and trip a false drift.
 
 Run it the same way locally: `python scripts/check_lock.py` (needs pip-tools==7.5.3).
 """
