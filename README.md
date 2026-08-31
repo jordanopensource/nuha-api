@@ -13,52 +13,59 @@ English, or Kurdish without changing which model runs.
 
 ## How a request flows
 
-A single nginx proxy sits in front of three backend containers, one per dialect.
-The proxy reads the dialect from the path (`/<dialect>/classify`) and routes the
-request to the matching backend.
+One stateless api service answers everything. It reads the dialect from the
+path (`/<dialect>/classify`) and dispatches to that dialect's model, which it
+loaded at startup from the models volume.
 
 ```
-                         ┌─────────────────────┐
-   client ──────────────▶│     nginx proxy     │ :8000
-                         │ routes /<dialect>/… │
-                         └──────────┬──────────┘
-              ┌─────────────────────┼─────────────────────┐
-              ▼                     ▼                     ▼
-       ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-       │ nuha-api-arz │      │ nuha-api-acm │      │ nuha-api-ckb │  :8000 each
-       │ DIALECT=arz  │      │ DIALECT=acm  │      │ DIALECT=ckb  │
-       │  × replicas  │      │  × replicas  │      │  × replicas  │
-       └──────────────┘      └──────────────┘      └──────────────┘
+   client ──────────────▶ ┌─────────────────────┐
+                          │       nuha-api      │ :8000
+                          │  routes /<dialect>/…│
+                          │  arz + acm + ckb    │
+                          └──────────┬──────────┘
+                                     │ read-only
+                          ┌──────────▼──────────┐
+                          │    models volume    │  /models/<code>/
+                          │  dialect.json + the │  written only by the
+                          │    model snapshot   │  fetch service
+                          └─────────────────────┘
 ```
 
-Inside a backend, one request goes through these steps:
+Inside the service, one request goes through these steps:
 
-1. Preprocess the text with the dialect's own cleaning rules.
-2. Look the cleaned text up in an in-memory cache.
-3. On a cache miss, tokenize, run the model, and store the raw prediction.
-4. Derive the main class from the sub class using a fixed mapping.
-5. Look up the label strings in the language you asked for and return them.
+1. Look the path's dialect up in the registry of loaded models (unknown -> 400).
+2. Preprocess the text with the dialect's own cleaning rules.
+3. Look the cleaned text up in that dialect's in-memory cache.
+4. On a cache miss, tokenize, run the model, and store the raw prediction.
+5. Derive the main class from the sub class using a fixed mapping.
+6. Look up the label strings in the language you asked for and return them.
 
 ## Why it is built this way
 
-I build one image per dialect, each baking in only that dialect's model. A single
-`Dockerfile` does all three: it takes a `DIALECT` build argument, reads that
-dialect's model repo from its dialect file, and downloads just that one model.
-The dialect code becomes the image tag (`nuha-api:arz`, `nuha-api:acm`,
-`nuha-api:ckb`). At runtime the `DIALECT` environment variable selects the same
-dialect, so the container loads the model that is actually present.
+Models are DATA, not image layers. One image serves every dialect and carries
+no model; the models live on a Docker volume, one directory per dialect,
+installed and removed at runtime by the fetch service. The api scans that
+volume once at startup, so the operator flow for changing what the stack
+serves is:
 
-Each image carries exactly one model, so it is far smaller than a single image
-holding all three would be (about 1.0 GB for a BERT dialect, 1.6 GB for the
-larger Kurdish model). It also means I can build, ship, and scale each dialect on
-its own. If Iraqi traffic spikes, I add Iraqi replicas without touching the
-others.
+```bash
+docker compose run --rm fetch add <code>    # or: remove <code>
+docker compose restart api
+```
 
-Everything that is specific to a dialect lives in one file: `app/dialects/<code>.json`.
-That file holds the dialect's name, its HuggingFace model repo, its languages, its
-preprocessing rules, its memory limit, its replica count, and its labels. The
-application code carries no hardcoded dialect knowledge. Adding a dialect is a
-one-file change, which I cover below.
+No image rebuild, no compose edit, no repo change. Which dialects exist is
+decided by the volume's contents, the same way the rest of the stack treats
+configuration as data. A dialect whose directory is broken stays out of
+service while its siblings load, and the service starts (and answers its
+contract) even with an empty volume, so bootstrapping is: bring it up, fetch,
+restart.
+
+Everything that is specific to a dialect lives in one file. In the repo it is
+`app/dialects/<code>.json` (the reviewed source); on the volume the fetch
+command installs the same file next to the model as `dialect.json`, so the
+config travels with the artifact it describes. The file holds the dialect's
+name, its HuggingFace model repo, its languages, its preprocessing rules, and
+its labels. The application code carries no hardcoded dialect knowledge.
 
 ## Dialects and models
 
@@ -73,8 +80,8 @@ The dialect codes are [ISO 639-3](https://iso639-3.sil.org/) language codes:
 Kurdish/Sorani). I use one standard for all three so the codes stay consistent.
 
 The model repos follow the upstream projects: `nuha-` for Egyptian models,
-`safa-` for Iraqi and Kurdish. The repos are public, so the build downloads them
-without a token.
+`safa-` for Iraqi and Kurdish. The repos are public, so the fetch command
+downloads them without a token.
 
 The Egyptian taxonomy has 10 sub classes that roll up into 5 main classes. The
 Iraqi and Kurdish dialects share the SAFA taxonomy: 13 sub classes into 6 main
@@ -89,68 +96,54 @@ flags set in the dialect files, not two copies of the code.
 
 ### The full stack with Docker Compose
 
-This is the way to run all three dialects behind the proxy.
-
 ```bash
 # Optional: copy the sample env if you want to override any defaults.
 # Every variable already has a sensible default, so this step is optional.
 cp .sample.env .env
 
-# Build the three per-dialect images (each bakes in only its own model).
-docker compose build
+# Build the one image and start the api (the models volume starts empty).
+docker compose up -d --build api
 
-# Start the three dialect backends and the nginx proxy.
-docker compose up -d
+# Install the models onto the volume, then restart so the api loads them.
+docker compose run --rm fetch add --all
+docker compose restart api
 ```
 
-The API is then on port 8000 (change it with `PORT` in `.env`). The proxy waits
-for all three backends to report healthy before it accepts traffic.
+The API is then on port 8000 (change it with `PORT` in `.env`). `restart`
+honors the 160s stop grace, so on a live stack it drains in-flight requests
+before the fresh startup scan.
 
-Compose tags the images it builds locally `nuha-api:arz`, `nuha-api:acm`, and
-`nuha-api:ckb`. To run CI-published images from a registry instead, set
-`NUHA_IMAGE_PREFIX` to the repository path AND pick a release channel with
-`NUHA_IMAGE_TAG_PREFIX`; Compose assembles `<prefix>:<channel>-<code>` per
-dialect. For the JOSA registry:
+Compose tags the image it builds locally `nuha-api:local`. To run a
+CI-published image from the registry instead, point `NUHA_API_IMAGE` at the
+repository and pick a release channel with `NUHA_API_TAG`:
 
 ```bash
-NUHA_IMAGE_PREFIX=registry.cloud.josa.ngo/library/nuha-api \
-NUHA_IMAGE_TAG_PREFIX=stable- docker compose up -d
+NUHA_API_IMAGE=registry.cloud.josa.ngo/library/nuha-api \
+NUHA_API_TAG=stable-api docker compose up -d
 ```
 
-Note: only the per-dialect **backend** images come from the registry. The proxy
-runs stock `nginx`, and its routing config is **not baked into any image** — it
-is bind-mounted from the repo (`nginx.conf` and `nginx/dialects.conf.template`).
-So a registry deploy still needs `compose.yml` and those two files present on the
-host.
+Tags are channel-first: CI publishes `stable-api` from `main` and `latest-api`
+from other branches, each with a checksum-pinned `<channel>-<sha>-api` variant
+for rollback, and deliberately no bare tag, so a deploy always states which
+channel it follows and a work-in-progress branch push can never overwrite what
+production pulls. The models are NOT in these images: a registry deploy still
+populates its own volume with the fetch service.
 
-That resolves to `…/nuha-api:stable-arz`, `…/nuha-api:stable-acm`, and
-`…/nuha-api:stable-ckb` — images built from `main` after the full CI gate
-(lint, lockfile check, per-dialect tests). Use `NUHA_IMAGE_TAG_PREFIX=latest-`
-to track branch builds on a staging box. Tags are channel-first: CI publishes
-`stable-<code>` from `main` and `latest-<code>` from other branches, each with a
-checksum-pinned `<channel>-<sha>-<code>` variant for rollback, and deliberately
-no bare `<code>` tag — so a deploy always states which channel it follows, and a
-work-in-progress branch push can never overwrite what production pulls. The
-`<channel>-<sha>-<code>` pins are immutable; use one directly in an override file
-to freeze a deployment.
-
-### One dialect in a single container
-
-If you only need one dialect, run that dialect's image directly. `DIALECT` is
-required, and it must match the dialect the image was built for (the image bakes
-in only that one model). Each image already defaults `DIALECT` to the dialect it
-was built for, so a bare run works.
+There is a dev-host override that shrinks the api to fit an 8 GiB box:
 
 ```bash
-docker run -p 8000:8000 nuha-api:arz
+docker compose -f compose.yml -f compose.dev.yml up -d
+```
 
-# An image from the registry (tags are channel-first: stable-<code> or latest-<code>),
-# with a couple of overrides:
-docker run -p 8000:8000 \
-  -e DIALECT=acm \
-  -e LOG_LEVEL=DEBUG \
-  -e CLASSIFIER_WORKERS=2 \
-  registry.cloud.josa.ngo/library/nuha-api:stable-acm
+### One dialect only
+
+Install just that dialect and nothing else; the api serves exactly what the
+volume holds:
+
+```bash
+docker compose up -d --build api
+docker compose run --rm fetch add arz
+docker compose restart api
 ```
 
 ### Locally for development
@@ -163,72 +156,68 @@ source venv/bin/activate            # Windows: venv\Scripts\activate
 # Install the runtime dependencies.
 pip install -r requirements.txt
 
-# Download the ONNX model for the dialect you want to run.
-pip install huggingface_hub
-hf download thejosango/nuha-arz-sub-onnx --local-dir ./models/arz
+# Install a model into ./models (the local-dev default for MODELS_DIR; the
+# directory is created on first use).
+python scripts/fetch_models.py add arz
 
-# Run it. DIALECT is required; the model must exist at ./models/{DIALECT}.
-DIALECT=arz uvicorn app.main:app --reload
+# Run it. The startup scan loads whatever ./models holds.
+uvicorn app.main:app --reload
 ```
 
-Repeat the download step with `thejosango/safa-acm-sub-onnx` into `./models/acm`
-or `thejosango/safa-ckb-sub-onnx` into `./models/ckb` for the other dialects. The
-repos hold the exported ONNX graph and its tokenizer, which is all the runtime
-needs. If your models live somewhere else, point `MODEL_PATH` at the directory.
+Repeat the fetch for `acm` or `ckb` to serve more dialects locally. Each model
+directory holds the exported ONNX graph, its tokenizer, and the installed
+`dialect.json`, which is all the runtime reads.
 
 ### Tests
 
 The tests mock the ML imports, so you do not need the models present to run
-them. The suite hardcodes no dialect values: dialect-file tests validate
-structure (required fields with sane types, a well-formed `hf_repo` id,
-consistent label maps, and that the app's own loader accepts every file), and
-API tests check that each instance serves exactly what its dialect file
-declares. Everything is discovered from `app/dialects/*.json`, so the same
-tests pass unchanged whether that directory holds one file or fifty, and a new
-dialect is covered without touching the tests. `DIALECT` selects the instance
-under test (it defaults to the first discovered dialect if unset).
+them. The suite hardcodes no dialect values: it discovers `app/dialects/*.json`
+and builds throwaway model volumes from those files, so the real startup scan,
+schema validation, and routing run against whatever dialects exist, whether
+that directory holds one file or fifty. One run covers everything; there is no
+per-dialect matrix and no selection variable.
 
 ```bash
 pip install -r requirements-test.txt
-
-# Run the suite once per dialect (all pass; a few skip when HuggingFace is
-# unreachable or a check does not apply to that dialect):
-DIALECT=arz pytest
-DIALECT=acm pytest
-DIALECT=ckb pytest
+pytest
 ```
 
 The suite also verifies, for every dialect, that its `hf_repo` actually exists,
-is public, and ships an ONNX graph (`tests/test_dialect_models.py`). That is the
-one part that reaches the network; it runs by default and is a real gate (a
+is public, and ships an ONNX graph (`tests/test_dialect_models.py`). That is
+the one part that reaches the network; it runs by default and is a real gate (a
 missing/private/non-ONNX repo fails), and it skips *only* if HuggingFace is
 unreachable, so a transient outage never turns a build red. A skip otherwise
 means a test's precondition doesn't apply to that dialect (e.g. rejecting a
-language no other dialect serves either). CI runs this suite once per dialect
-(the `run-tests` step in both Woodpecker pipelines) before any image is built,
-so a failing test blocks every image push.
+language no other dialect serves either). CI runs this suite before the image
+is built, so a failing test blocks the image push.
+
+There is also a live smoke script that proves the frozen contract AND the
+runtime add/remove story against a real stack (`scripts/e2e_smoke.sh`); it
+asserts status codes only, so it is deterministic regardless of what the
+models predict.
 
 ## The API
 
 | Method | Path                        | What it does                          |
 |--------|-----------------------------|---------------------------------------|
-| `GET`  | `/health`                   | Liveness check                        |
+| `GET`  | `/health`                   | Liveness plus the loaded dialect codes |
+| `GET`  | `/ready`                    | Readiness (200 once the startup scan ran) |
 | `POST` | `/{dialect}/classify`       | Classify one text (dialect in path)   |
 | `POST` | `/{dialect}/classify/batch` | Classify a list of texts (dialect in path) |
 
-Interactive docs (`/docs`, `/redoc`, `/openapi.json`) ship DISABLED: `.env`
-sets `DISABLE_DOCS=1` by default, since the docs are the one unauthenticated
-path that isn't classification traffic. To serve them, remove (or comment out)
-the `DISABLE_DOCS=1` line in your `.env` and restart; the proxy already routes
-and rate-limits the docs paths.
+Interactive docs (`/docs`, `/redoc`, `/openapi.json`) are served unless
+`DISABLE_DOCS` is set. The shipped [`.sample.env`](.sample.env) sets
+`DISABLE_DOCS=1`, so a deployment that copies it (the documented first step)
+runs docs-off; the docs are the one unauthenticated path that isn't
+classification traffic, so keep that line in production. A bare container with
+no env file serves them, which is convenient in development.
 
 ### Choosing the dialect
 
 Every request names a dialect in the **path** (`/acm/classify`,
-`/acm/classify/batch`). The proxy routes it to the matching backend, and the
-backend rejects a dialect that is not its own with a 422; an unrecognized dialect
-is a 400 at the proxy. The dialect is always in the path and `lang` always in the
-request body.
+`/acm/classify/batch`). The valid set is exactly the dialects loaded from the
+models volume; an unknown code is a 400 whose message names the loaded codes.
+The dialect is always in the path and `lang` always in the request body.
 
 ### The `lang` field
 
@@ -281,8 +270,8 @@ fields are `null`.
 
 ### curl examples
 
-These run against the proxy on port 8000. I verified each one against a running
-container.
+These run against the api on port 8000. I verified each one against a running
+stack.
 
 ```bash
 # Egyptian Arabic, Arabic labels (lang defaults to ar). Dialect in the path.
@@ -319,246 +308,213 @@ curl -X POST "http://localhost:8000/arz/classify/batch" \
   items (1000 by default). Each text is capped at 50000 characters, but there is
   no minimum: an empty string in a batch comes back with `is_valid=false` rather
   than failing the whole request.
+- 422 bodies keep their `detail` list shape but never echo the rejected input
+  value back.
 
 The status codes you can get:
 
 | Code | When                                                                       |
 |------|----------------------------------------------------------------------------|
 | 200  | Success                                                                     |
-| 400  | Unknown `dialect` at the proxy, or a malformed request body at the backend |
-| 413  | Request body over the size cap (`MAX_BODY_SIZE` / nginx `client_max_body_size`) |
-| 422  | Bad input, a `dialect` that does not match the backend, or an invalid `lang`|
-| 429  | Too many requests: a per-client or per-peer rate limit was exceeded at the proxy |
+| 400  | Unknown `dialect` in the path (the message names the loaded codes)          |
+| 404  | A classify path without a dialect segment (`/classify` is not a route)      |
+| 405  | A wrong method on a classify route                                          |
+| 413  | Request body over the size cap (`MAX_BODY_SIZE`, declared or chunked)       |
+| 422  | Bad input or an invalid `lang` (a malformed body is a 422, never a 400)     |
+| 429  | Reserved for the platform edge's rate limiter; the app itself never sends it |
 | 500  | An unexpected error (the body is generic, no stack trace leaks)            |
 | 503  | Overloaded: every slot is busy, the short queue is full, or a queued request waited too long |
 | 504  | An inference ran past `INFERENCE_TIMEOUT`, which means something is wrong   |
 
-The 400, 413, 429, 500, 503, and 504 codes are additions; the 200 and 422 behavior
-is unchanged.
+The set is closed: nothing outside this table, and never a 502.
 
 ## Configuration
 
-Configuration is by environment variable. `.env` holds the settings that are the
-same across all three dialects; the per-dialect settings live in the dialect
-files instead. See [`.sample.env`](.sample.env) for the full list with comments.
-Anything dialect-specific (memory limit, replica count) is in
-`app/dialects/<code>.json`, not here, so shared config stays shared.
+Configuration is by environment variable; `.env` holds the overrides and every
+variable has a sensible default in the code. See [`.sample.env`](.sample.env)
+for the full list with comments. Anything dialect-specific lives in the dialect
+file on the volume, not here, so shared config stays shared.
 
 | Variable             | Default                | What it does                                                                 |
 |----------------------|------------------------|------------------------------------------------------------------------------|
-| `DIALECT`            | *(required)*           | Which dialect this container serves: `arz`, `acm`, or `ckb`. No default.       |
-| `MODEL_PATH`         | `./models/{DIALECT}`   | Where to load the model from. Derived from `DIALECT` if unset.                |
-| `CLASSIFIER_WORKERS` | `2`                    | How many inferences run at once. Sizes the thread pool and the gate's slots.  |
+| `MODELS_DIR`         | `./models` (compose: `/models`) | Where the model directories live; scanned once at startup.           |
+| `CLASSIFIER_WORKERS` | `2`                    | How many inferences run at once, process-wide across all dialects.            |
 | `INFERENCE_QUEUE_SIZE` | `32`                 | Requests that may wait for a slot before shedding 503. 0 = shed immediately.  |
 | `INFERENCE_QUEUE_TIMEOUT` | `30`              | Seconds a queued request waits for a slot before a 503.                       |
 | `ORT_INTRA_OP_THREADS`| `1`                   | ONNX Runtime threads per inference. Keep at 1 (see Deployment notes).         |
 | `INFERENCE_TIMEOUT`  | `120`                  | Per-request inference timeout in seconds. A safety backstop, not a tuning knob.|
 | `MAX_BATCH_SIZE`     | `1000`                 | Most texts allowed in one batch request.                                      |
-| `MAX_BODY_SIZE`      | `10485760`             | App-layer request body cap in bytes (10 MiB); oversized bodies get a 413. Keep in sync with nginx `client_max_body_size`. |
-| `CACHE_SIZE`         | `1024`                 | LRU capacity of the prediction cache. 0 disables it.                          |
-| `EXPOSE_CACHE_STATS` | *(off)*                | If set, `/health` includes cache hit and miss stats. Off so it leaks nothing. |
+| `MAX_BODY_SIZE`      | `10485760`             | Request body cap in bytes (10 MiB); oversized bodies get a 413.               |
+| `CACHE_SIZE`         | `1024`                 | LRU capacity of the prediction cache, PER DIALECT. 0 disables it.             |
+| `EXPOSE_CACHE_STATS` | *(off)*                | If set, `/health` includes per-dialect cache stats. Off so it leaks nothing.  |
 | `DISABLE_DOCS`       | *(set in `.env`)*      | If set, turns off `/docs`, `/redoc`, and `/openapi.json`. The shipped `.env` sets it; remove the line to serve docs. |
 | `LOG_LEVEL`          | `INFO`                 | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.                           |
 | `LOG_FORMAT`         | `text`                 | `text` for humans, `json` for log aggregation.                               |
-| `PORT`               | `8000`                 | Port the proxy publishes.                                                     |
+| `PORT`               | `8000`                 | Host port compose publishes.                                                  |
 | `TIMEOUT`            | `120`                  | Uvicorn keep-alive timeout in seconds. Not a request timeout.                 |
 
-A couple of compose-level variables: `DEFAULT_DIALECT` is the dialect whose
-backend the proxy routes the docs pages to. Its compose value is derived from the
-dialect files (`arz` when present, otherwise the first dialect alphabetically),
-so it stays valid even if `arz` is removed; override it to pin
-a different default.
-`NUHA_IMAGE_PREFIX` (default `nuha-api`) is the repository prefix for the
-per-dialect backend images and `NUHA_IMAGE_TAG_PREFIX` (default empty) is the
-release channel prepended to the dialect code — empty for local builds,
-`stable-` or `latest-` for registry images (see Running it). `BACKEND_CPU_LIMIT`,
-`PROXY_CPU_LIMIT`, `PROXY_MEM_LIMIT`, and `BACKEND_MEM_RESERVATION` set Compose
-resource caps.
+Compose-level variables: `NUHA_API_IMAGE` (default `nuha-api`) and
+`NUHA_API_TAG` (default `local`) select the image; `API_CPU_LIMIT` (default
+`3.0`) and `API_MEM_LIMIT` (default `10g`) cap the api container.
 
 ## Deployment notes
 
-### The proxy
+### The models volume is the control surface
 
-nginx terminates client connections and routes by dialect. It also:
+The volume holds one directory per dialect (`/models/<code>/`), containing the
+installed `dialect.json` and the model snapshot. The api mounts it READ-ONLY
+and scans it once at startup; the fetch service is the only writer and the
+only piece that needs network egress to HuggingFace. The startup scan ignores
+anything that does not look like a dialect directory (the fetch command stages
+downloads in dot-prefixed directories and activates them with an atomic
+rename), validates each `dialect.json` against the shared schema, checks the
+model's declared output width against its labels, and runs one tiny
+self-inference before a dialect is allowed to serve, so a broken or
+mis-packaged directory stays out while its siblings load.
 
-- Rate limits per IP: 100 requests a second to `/classify`, 20 a second to
-  `/classify/batch`, since batches are heavier. Over the limit gets a 429. The
-  per-IP buckets key on the client IP recovered from `X-Forwarded-For` when the
-  connection comes from a trusted private range (so a fronting proxy or LB gets
-  per-client limits, not one shared bucket). Because that header is
-  client-supplied, a second set of zones caps each connection *peer* at 30x the
-  per-client rate: a legitimate proxy carrying many clients fits comfortably,
-  while a host spoofing a fresh `X-Forwarded-For` per request is bounded instead
-  of unlimited. The docs paths get their own modest limit (10 r/s).
-- Sets `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
-- Serves its own `/health` with a 200 instead of proxying to a backend.
-- Serves the docs from the default dialect's backend, since docs do not depend on
-  the dialect.
-- Accepts request bodies up to 10 MiB, which covers a normal batch of Arabic or
-  Kurdish text and rejects oversized ones before they reach a backend.
-- Keeps client-facing timeouts tight, but allows a long read timeout (155s) on
-  the classify routes so a slow batch is not cut off. That timeout sits just
-  above the app's full latency budget (`INFERENCE_QUEUE_TIMEOUT + INFERENCE_TIMEOUT`,
-  30 + 120 = 150s) so the app returns its own clean 503/504 first and nginx is
-  only a fallback.
+The runbook:
 
-The routing config is generated from the dialect files, so the proxy never has a
-hardcoded list of dialects (more on that below).
+```bash
+docker compose run --rm fetch add <code>        # install or upgrade (re-fetch)
+docker compose run --rm fetch add xyz --file xyz.json   # trial a new dialect
+docker compose run --rm fetch add <code> --revision <r> # pin a model revision
+docker compose run --rm fetch remove <code>
+docker compose run --rm fetch list
+docker compose restart api                      # pick any of the above up
+```
+
+Model revisions are deliberately unpinned by default, so a re-fetch picks up
+the HF repo's head without a code change (the same trade-off the old
+build-time bake had, now without the rebuild). `restart` drains: the 160s
+`stop_grace_period` sits above the engine's worst-case admitted request
+(30s queue wait + 120s inference), so in-flight work finishes before the fresh
+scan. A single instance is briefly down while it reloads; with replicas behind
+the platform edge, restart them serially.
+
+### The edge
+
+There is no reverse proxy in this stack; the api is the single public service.
+TLS termination, per-IP rate limiting (the 429 in the status table), and
+slow-client handling belong to the platform edge in front of it. The app
+carries its own body-size cap, security headers, and overload shedding, so a
+directly exposed container still bounds itself.
 
 ### Inference, concurrency, and overload
 
-Inference is CPU bound, so the tuning rule is one in-flight inference per CPU the
-container is allowed. Keep `CLASSIFIER_WORKERS` equal to the backend's CPU limit
-and keep `ORT_INTRA_OP_THREADS` at 1. The product of the two should stay near
-the CPU limit: that runs `CLASSIFIER_WORKERS` single-threaded inferences, one per
-core. To favour fewer but faster (multi-threaded) batches over concurrency, raise
-`ORT_INTRA_OP_THREADS` and lower `CLASSIFIER_WORKERS` to keep that product the
-same. For responsiveness under load, give the backend a little CPU headroom above
-the inference slots (set `BACKEND_CPU_LIMIT` slightly above `CLASSIFIER_WORKERS`)
-so the event loop, tokenization, and health checks keep running while every slot
-is busy.
+Inference is CPU bound, so the tuning rule is one in-flight inference per CPU
+the container is allowed. Keep `CLASSIFIER_WORKERS` about one below
+`API_CPU_LIMIT` and keep `ORT_INTRA_OP_THREADS` at 1. The product of the two
+should stay near the CPU limit: that runs `CLASSIFIER_WORKERS` single-threaded
+inferences, one per core. To favour fewer but faster (multi-threaded) batches
+over concurrency, raise `ORT_INTRA_OP_THREADS` and lower `CLASSIFIER_WORKERS`
+to keep that product the same. The headroom above the slots keeps the event
+loop, tokenization, and health checks responsive while every slot is busy.
 
 The reason for pinning the per-inference threads is a real trap, and it is the
 same one the old torch build had. Left to its default, ONNX Runtime sizes its
-intra-op thread pool to the host core count and ignores the Docker CPU cap. Under
-that cap the kernel throttles the container and every inference slows down. With
-`CLASSIFIER_WORKERS` inferences in flight, each also trying to use every host
-core, they oversubscribe the CPU badly. Pinning `ORT_INTRA_OP_THREADS` to 1 keeps
-each inference on a single core, so the slots run one per core with no
-oversubscription. (This single variable replaces the two torch-only
-`OMP_NUM_THREADS` and `MKL_NUM_THREADS` knobs the PyTorch build used.)
+intra-op thread pool to the host core count and ignores the Docker CPU cap.
+Under that cap the kernel throttles the container and every inference slows
+down. Pinning `ORT_INTRA_OP_THREADS` to 1 keeps each inference on a single
+core, so the slots run one per core with no oversubscription.
 
-Each backend protects itself with a bounded admission gate. At most
-`CLASSIFIER_WORKERS` inferences run at once; a request that finds every slot busy
-waits up to `INFERENCE_QUEUE_TIMEOUT` seconds for one to free instead of being
-shed immediately, so a short burst is served (200) rather than rejected the
-instant both workers are busy. Once `CLASSIFIER_WORKERS + INFERENCE_QUEUE_SIZE`
-requests are in flight, or a queued request waits past the timeout, the backend
-sheds a fast 503, so latency and memory stay bounded under genuine sustained
-overload. The queue smooths bursts within capacity; it does not add throughput,
-so scale with replicas (and keep inference fast) to raise the ceiling. Set
-`INFERENCE_QUEUE_SIZE=0` for the original no-queue, shed-immediately behavior.
-There is also a per-request timeout: an
-inference that runs past `INFERENCE_TIMEOUT` returns a 504. That timeout is a
-backstop for something genuinely stuck, not a tuning knob, so set it well above
-your worst-case batch time. A full 1000-text batch is a single inference that can
-take tens of seconds on a 2-CPU cap, and the default 120s leaves wide margin.
+The admission gate is process-wide and shared by every loaded dialect: at most
+`CLASSIFIER_WORKERS` inferences run at once; a request that finds every slot
+busy waits up to `INFERENCE_QUEUE_TIMEOUT` seconds for one to free instead of
+being shed immediately, so a short burst is served (200) rather than rejected
+the instant both workers are busy. Once `CLASSIFIER_WORKERS +
+INFERENCE_QUEUE_SIZE` requests are in flight, or a queued request waits past
+the timeout, the api sheds a fast 503. One consequence of the shared gate: a
+burst on one dialect sheds siblings' requests too, because the capacity being
+protected is the process's CPU, not a per-dialect budget. The queue smooths
+bursts within capacity; it does not add throughput, so scale with replicas to
+raise the ceiling. There is also a per-request timeout: an inference that runs
+past `INFERENCE_TIMEOUT` returns a 504. That timeout is a backstop for
+something genuinely stuck, not a tuning knob; a full 1000-text batch is a
+single inference that can take tens of seconds on a 2-CPU cap, and the default
+120s leaves wide margin.
 
 Uvicorn worker processes are fixed at 1 in the image entrypoint (there is no
 `WORKERS` variable). The model forward pass releases the GIL, so one process
 already saturates the CPU the container has; a second worker would be a full
-copy of the model in memory for no throughput gain. One model instance serves
-`CLASSIFIER_WORKERS` requests concurrently — raise that (with
-`BACKEND_CPU_LIMIT`) for more simultaneity per container, and scale with
-replicas beyond that.
+copy of every model in memory for no throughput gain. Raise
+`CLASSIFIER_WORKERS` (with `API_CPU_LIMIT`) for more simultaneity per
+container, and scale with replicas beyond that.
 
 ### Memory
 
-Each dialect's memory limit is the `mem_limit` field in its dialect file,
-rendered into `compose.yml`. They are all set to `4g` right now. That is a
-deliberate, comfortable ceiling, not a measured requirement. Under a heavy stress
-load the real peaks are around 1.5 GiB for the BERT dialects (`arz`, `acm`) and a
-bit over 2 GiB for `ckb`, which is heavier because XLM-RoBERTa has a larger
-multilingual embedding matrix. A limit is a ceiling, not a reservation, so
-choosing `4g` does not reserve 12 GiB. Size the host to the real peak (roughly
-1.5 to 2 GiB per dialect plus the OS), not to the sum of the ceilings.
+One process holds every loaded model, so the container's footprint is the SUM
+of the models on the volume: under a heavy stress load the real peaks are
+around 1.5 GiB for the BERT dialects (`arz`, `acm`) and a bit over 2 GiB for
+`ckb` (XLM-RoBERTa has a larger multilingual embedding matrix), so the shipped
+three peak near 5-6 GiB together plus the web stack and in-flight bodies. The
+`API_MEM_LIMIT` default (10g) is a comfortable ceiling, not a reservation;
+`compose.dev.yml` caps it at 7g for an 8 GiB host. Installing more dialects
+raises the real footprint: raise the limit with the volume.
 
 ### Scaling
 
-Each dialect is a Compose service that scales to N replicas. The proxy
-round-robins across them automatically: a scaled service name resolves through
-Docker DNS to all of its replica IPs, and nginx spreads requests across them. No
-proxy change is needed to add capacity. The load balancing is round-robin rather
-than least-connections, which is fine here because each replica has its own 503
-gate, so an overloaded replica sheds and the retry lands on another.
+The api is stateless (the volume is read-only data), so capacity scales by
+running more replicas of the one service. On a single compose host the
+published port pins one instance; real horizontal scaling runs replicas behind
+the platform edge or an orchestrator, where each replica mounts the same
+models and serves the same dialect set. Note the unit of scaling is the whole
+service: every replica loads every model, so one hot dialect cannot be scaled
+alone. That is the deliberate trade of this design; the win is that replicas
+are interchangeable and the tech team can add or remove containers freely
+without any per-dialect wiring.
 
-The baseline replica count is the `replicas` field in each dialect file (default
-1). To change it for good, edit that field and re-render the config. For a
-temporary burst, for example during a workshop, override it at runtime with no
-rebuild:
-
-```bash
-docker compose up -d --scale nuha-api-arz=10   # ramp up
-docker compose up -d --scale nuha-api-arz=1    # back to baseline
-```
-
-Sizing: each replica runs `CLASSIFIER_WORKERS` concurrent inferences, so to serve
-about N batches at once on a dialect, set its replicas to roughly
-N / `CLASSIFIER_WORKERS`. The host needs `sum(replicas) × BACKEND_CPU_LIMIT`
-cores at peak. Keep at least 1 replica per dialect, since a dialect at 0 replicas
-fails its requests until you scale it back up.
-
-This is on-demand scaling that you drive by hand or by script. It fits a bursty
-workload like scheduled events well. True load-based autoscaling, including
-scale-to-zero, needs an orchestrator (Kubernetes with an HPA, or KEDA or
-Knative). The per-replica unit tuned here is exactly what such an autoscaler would
-replicate, so that work carries over. I have not built it; it is larger infra
-than the Compose model.
+True load-based autoscaling needs an orchestrator (Kubernetes with an HPA, or
+KEDA). The pieces map directly: the image is the Deployment, the models volume
+is a PVC (or an init container running the fetch command), and `/ready` is the
+readiness probe.
 
 ## Adding a dialect
 
-The whole design points at this being easy. To add a dialect you drop one file
-and rebuild. No application code changes.
+The whole design points at this being easy. To add a dialect you install one
+directory on the volume and restart. No application code changes, no rebuild,
+no compose or CI edit.
 
-1. Create `app/dialects/<code>.json`, where `<code>` is the new dialect's code
-   (it becomes the dialect's identifier). Give it a `name`, an `hf_repo`, a
-   `languages` list, a `preprocessing` block, a `mem_limit`, a `replicas` count,
-   and a `labels` block (sub and main labels per language, plus the sub-to-main
-   mapping). Copy an existing dialect file as a starting point.
-2. Re-render the generated config:
+1. Write the dialect's config file: a `name`, an `hf_repo`, a `languages`
+   block, a `preprocessing` block, and a `labels` block (sub and main labels
+   per language, plus the sub-to-main mapping). Copy an existing
+   `app/dialects/<code>.json` as a starting point. For a dialect the repo
+   should ship, commit it under `app/dialects/` (the `validate-dialects`
+   pre-commit hook checks it structurally); for a trial, any local file works.
+2. Install it and restart:
 
    ```bash
-   python scripts/render_config.py
+   docker compose run --rm fetch add <code>              # a committed dialect
+   docker compose run --rm fetch add <code> --file x.json  # a trial one
+   docker compose restart api
    ```
 
-   This regenerates `compose.yml` (a new backend service for your dialect), the
-   nginx routing (the `/<code>/classify` path maps to the new backend), and the
-   per-dialect build steps in the `.woodpecker` pipelines (so CI builds and
-   publishes the new image). The `render-config` pre-commit hook also does this
-   for you on commit, so you usually do not run it by hand.
-3. Build the image for the new dialect with `docker build --build-arg
-   DIALECT=<code> -t nuha-api:<code> .` (or `docker compose build` to build them
-   all). The model-download stage reads the dialect file and pulls your new
-   `hf_repo` automatically.
-
-The classifier globs `app/dialects/*.json` at import, so it picks up the new file
-with no edit. The only time you touch Python is if the dialect needs a brand new
+The fetch command validates the config against the shared schema BEFORE
+downloading, and the startup scan revalidates on load, so a broken file never
+serves. The only time you touch Python is if the dialect needs a brand new
 preprocessing family. In that case add a function to `_PREPROCESS_REGISTRY` in
 `app/classifier.py` and reference it by name in the dialect file's
 `preprocessing.type`. The existing `nuha` and `safa` preprocessors cover the
 current dialects.
 
-`compose.yml`, `nginx/dialects.conf.template`, and the two `.woodpecker` pipelines
-are generated. Do not hand-edit them. Edit the dialect files, or the matching
-template for non-dialect changes (`compose.template.yml`, or
-`woodpecker-templates/{latest,stable}.yaml` for the CI pipelines), then re-render.
-
 ## Build
 
-The Dockerfile builds one image per dialect. It takes a `DIALECT` build argument
-that selects which single model to bake in, in three stages:
+The Dockerfile builds ONE image with no model in it, in two stages:
 
-1. **Dependencies.** Install the Python packages into a virtual environment from
-   `requirements.lock`.
-2. **Model download.** Read the chosen dialect's `app/dialects/<code>.json`,
-   download that one model from its `hf_repo`, and bake only it. The repos are
-   public, so this needs no token.
-3. **Runtime.** A slim image with the virtual environment, the one model, and the
-   app, running as a non-root user. uvicorn runs as PID 1 for clean signal
-   handling. The image defaults `DIALECT` to the one it was built for.
+1. **Dependencies.** Install the Python packages into a virtual environment
+   from `requirements.lock` with `--require-hashes`.
+2. **Runtime.** A slim image with the virtual environment, the app, the repo's
+   dialect configs (the fetch command's install source), and the fetch script,
+   running as a non-root user. uvicorn runs as PID 1 for clean signal handling.
+   `/models` is created owned by the app user so the volume's first-use
+   initialization lets the fetch service write to it.
 
 ```bash
-# Build one dialect's image (downloads just that dialect's model).
-docker build --build-arg DIALECT=arz -t nuha-api:arz .
-
-# Run what you built.
-docker run -p 8000:8000 nuha-api:arz
+docker build -t nuha-api:local .
+docker run -p 8000:8000 -v models:/models:ro nuha-api:local
 ```
 
-`docker compose build` does this for all three dialects at once, producing
-`nuha-api:arz`, `nuha-api:acm`, and `nuha-api:ckb`. The images are CPU-only and
-sized to their one model: about 1.0 GB for `arz`, 1.1 GB for `acm`, and 1.6 GB
-for the larger XLM-RoBERTa `ckb` model.
+The image is CPU-only and model-free; the same image runs the api and the
+fetch service, so there is exactly one artifact to build, scan, and ship.
 
 ### Dependencies and the lockfile
 
@@ -567,7 +523,9 @@ runs on ONNX Runtime, whose `onnxruntime` wheel is a normal PyPI package, so the
 file needs no custom wheel index (unlike the old PyTorch `+cpu` build, which had
 to declare PyTorch's CPU wheel index). `transformers` is still a dependency, but
 only for its `AutoTokenizer`; the models are exported to ONNX and loaded through
-`onnxruntime`, not through transformers' model classes.
+`onnxruntime`, not through transformers' model classes. `huggingface_hub` (the
+fetch command's downloader) is already in the lock as a transitive dependency
+of transformers.
 
 `requirements.lock` is generated from `requirements.txt`. It is a fully pinned,
 fully hashed lock of the whole dependency tree. The Dockerfile installs the lock
@@ -592,27 +550,31 @@ the real models; the model files and the library version are matched.
 
 ```
 app/
-  classifier.py        Model loading, preprocessing, inference cache, active config
   main.py              FastAPI app, endpoints, validation, exception handlers
-  dialects/            One self-contained file per dialect (arz/acm/ckb).json:
-                       name, hf_repo, languages (each with a display name and
-                       aliases), preprocessing, mem_limit, replicas, and labels.
-                       The single source of truth.
-tests/                 pytest suite (the ML imports are mocked)
+  classifier.py        The engine: model loading, preprocessing, cache, gate
+  registry.py          The startup scan of the models volume
+  common/              Shared plumbing: config parsing, HTTP middleware and
+                       handlers, schemas, logging, and the dialect-file schema
+                       (dialect_schema.py, the single definition)
+  dialects/            One reviewed file per dialect (arz/acm/ckb).json: name,
+                       hf_repo, languages (each with a display name and
+                       aliases), preprocessing, and labels. The fetch command's
+                       install source; the runtime reads the volume's copies.
+tests/                 pytest suite (the ML imports are mocked; one run)
 scripts/
-  render_config.py     Regenerates compose.yml, the nginx routing, and the .woodpecker pipelines from dialects/
-nginx.conf             Static proxy config; includes the generated routing
-nginx/
-  dialects.conf.template  Generated routing map (one entry per dialect)
-Dockerfile             Three-stage per-dialect build (one model baked in)
-compose.template.yml   Hand-edited source for compose.yml
-compose.yml            Generated: three backends plus the proxy
-woodpecker-templates/  Hand-edited source for the .woodpecker pipelines
-.woodpecker/           Generated CI pipelines (one image per dialect, per channel)
+  fetch_models.py      Install/remove/list models on the volume (the compose
+                       fetch service's entrypoint)
+  validate_dialects.py Validate app/dialects/ (the pre-commit hook)
+  check_lock.py        Lockfile drift gate
+  e2e_smoke.sh         Live smoke: contract + the runtime add/remove story
+Dockerfile             Two-stage, model-free build (one image for everything)
+compose.yml            The api service + the fetch service + the models volume
+compose.dev.yml        8 GiB dev-host override
+.woodpecker/           CI pipelines (one image per channel)
 requirements.txt       Direct dependencies (onnxruntime, transformers, ...)
 requirements.lock      Generated, hashed lock installed by the Dockerfile
 requirements-test.txt  Test dependencies
-.env                   Shared runtime config (per-dialect config is in dialects/)
+.env                   Runtime config overrides
 .sample.env            Generated from .env by samplr
 ```
 
@@ -628,29 +590,29 @@ pre-commit run --all-files          # optional, run on everything once
 
 The hooks cover Ruff (Python lint and format), YAML and TOML syntax, trailing
 whitespace and merge markers, secret detection (Gitleaks), and Conventional
-Commit messages. The `render-config` hook keeps `compose.yml`, the nginx
-routing, and the `.woodpecker` pipelines in step with the dialect files; it also
-validates each dialect file structurally first (required fields and types, a
-well-formed `hf_repo` id, label/language consistency, a sound `sub_to_main`
-mapping) and rejects the commit with a clear message if one is broken, so a bad
-dialect file is caught at commit time rather than in CI. `run-samplr` keeps
+Commit messages. The `validate-dialects` hook checks every `app/dialects/*.json`
+against the shared schema (required fields and types, a well-formed `hf_repo`
+id, label/language consistency, a sound `sub_to_main` mapping) and rejects the
+commit with a clear message if one is broken, so a bad dialect file is caught
+at commit time rather than at install or load time. `run-samplr` keeps
 `.sample.env` in step with `.env`. (The tests remain the full gate and run in
 CI; the hook's check is the fast structural subset that needs no dependencies.)
 
 ## Response contract
 
 - The response schema is `is_valid`, `sub_class`, `main_class`, `confidence`.
-- Status codes: 200 for a served request and 422 for invalid input; 400 (unknown
-  dialect at the proxy, or a malformed body at the backend), 413 (body too large),
-  429 (rate limited), 500, 503,
-  and 504 cover the
-  error cases. 422 bodies keep their `detail` list shape but do not echo the
-  rejected input value back.
+- Status codes: 200 for a served request and 422 for invalid input; 400
+  (unknown dialect), 404 (no dialect segment), 405 (wrong method), 413 (body
+  too large), 429 (platform edge only), 500, 503, and 504 cover the error
+  cases. The set is closed and a 502 never occurs. 422 bodies keep their
+  `detail` list shape but do not echo the rejected input value back.
 
 ## Next steps
 
-- Explore container orchestration and autoscaling. Scaling today is manual: I set
-  the replica counts by hand or with a script. An orchestrator like Kubernetes
-  (with an HPA) or KEDA could scale each dialect automatically on load, including
-  scaling to zero between bursts. The per-replica unit is already tuned, so that
-  work carries straight over.
+- Explore container orchestration and autoscaling. The service is already the
+  right unit for it: stateless replicas over a read-only models volume, with
+  `/ready` as the probe. Kubernetes with an HPA (or KEDA) could scale on load,
+  with the fetch command running as a Job or init container against a PVC.
+- Hot reload of the models volume (a periodic rescan instead of the restart)
+  is a contained follow-up if the restart step ever becomes a burden; the
+  registry's scan is already the seam it would build on.
