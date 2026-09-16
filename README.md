@@ -13,22 +13,26 @@ English, or Kurdish without changing which model runs.
 
 ## How a request flows
 
-One stateless api service answers everything. It reads the dialect from the
-path (`/<dialect>/classify`) and dispatches to that dialect's model, which it
-loaded at startup from the models volume.
+An nginx proxy fronts one stateless api service. The proxy is the published
+entry point (TLS termination point, per-IP rate limiting, a body cap, security
+headers); the api reads the dialect from the path (`/<dialect>/classify`) and
+dispatches to that dialect's model, which it loaded at startup from the models
+volume. The proxy carries no per-dialect config: the api validates the dialect
+and answers the 400 for an unknown one, so a dialect added to the volume at
+runtime needs no proxy change.
 
 ```
-   client ──────────────▶ ┌─────────────────────┐
-                          │       nuha-api      │ :8000
-                          │  routes /<dialect>/…│
-                          │  arz + acm + ckb    │
-                          └──────────┬──────────┘
-                                     │ read-only
-                          ┌──────────▼──────────┐
-                          │    models volume    │  /models/<code>/
-                          │  dialect.json + the │  written by models-init
-                          │    model snapshot   │  and the fetch service
-                          └─────────────────────┘
+   client ─▶ ┌───────────┐    ┌─────────────────────┐
+             │   nginx   │ ─▶ │       nuha-api      │
+             │   proxy   │    │  routes /<dialect>/…│
+             │  :8000    │    │  arz + acm + ckb    │
+             │ TLS, rate │    └──────────┬──────────┘
+             │  limit    │               │ read-only
+             └───────────┘    ┌──────────▼──────────┐
+                              │    models volume    │  /models/<code>/
+                              │  dialect.json + the │  written by models-init
+                              │    model snapshot   │  and the fetch service
+                              └─────────────────────┘
 ```
 
 Inside the service, one request goes through these steps:
@@ -127,7 +131,11 @@ cp .sample.env .env
 docker compose up -d --build
 ```
 
-The API is then on port 8000 (change it with `PORT` in `.env`). On every
+The API is then on port 8000 (change it with `PORT` in `.env`). That port is the
+nginx `proxy`, which fronts the api with rate limiting, a body cap, and security
+headers. For HTTPS, add a `listen 443 ssl` block to `nginx.conf` and mount your
+certificates into the proxy, or terminate TLS at your platform edge and drop the
+proxy service (point the edge at the api). On every
 later `up`, models-init verifies the volume and touches the network
 only when something is missing or broken; append `--update` to its command in
 `compose.yml` if you want it to also refresh unpinned installs whose recorded
@@ -349,7 +357,7 @@ The status codes you can get:
 | 405  | A wrong method on a classify route                                          |
 | 413  | Request body over the size cap (`MAX_BODY_SIZE`, declared or chunked)       |
 | 422  | Bad input or an invalid `lang` (a malformed body is a 422, never a 400)     |
-| 429  | Reserved for the platform edge's rate limiter; the app itself never sends it |
+| 429  | Sent by the nginx proxy's rate limiter (per IP or per peer); the app itself never sends it |
 | 500  | An unexpected error (the body is generic, no stack trace leaks)            |
 | 503  | Overloaded: every slot is busy, the short queue is full, or a queued request waited too long |
 | 504  | An inference ran past `INFERENCE_TIMEOUT`, which means something is wrong   |
@@ -432,11 +440,13 @@ the platform edge, restart them serially.
 
 ### The edge
 
-The api is the single public service, with no reverse proxy in the stack.
-TLS termination, per-IP rate limiting (the 429 in the status table), and
-slow-client handling belong to the platform edge in front of it. The app
-carries its own body-size cap, security headers, and overload shedding, so a
-directly exposed container still bounds itself.
+The nginx `proxy` service is the published entry point and the edge in front of
+the api: it terminates TLS (add a `listen 443 ssl` block and mount certificates),
+rate-limits per IP and per peer (the 429 in the status table), caps the body,
+adds security headers, and absorbs slow clients. The api keeps its own body-size
+cap, security headers, and overload shedding as well, so it stays bounded even
+when reached directly. On a platform that already provides an edge (a load
+balancer, for instance), drop the proxy service and point that edge at the api.
 
 ### Inference, concurrency, and overload
 
@@ -621,8 +631,9 @@ scripts/
   check_lock.py        Lockfile drift gate
   e2e_smoke.sh         Live smoke: contract + the runtime add/remove story
 Dockerfile             Two-stage, model-free build (one image for everything)
-compose.yml            The api, models-init, and fetch services + the volume
+compose.yml            The proxy, api, models-init, and fetch services + volume
 compose.dev.yml        8 GiB dev-host override
+nginx.conf             The proxy's config: TLS point, rate limits, routing
 .woodpecker/           CI pipelines (one image per channel)
 requirements.txt       Direct dependencies (onnxruntime, transformers, ...)
 requirements.lock      Generated, hashed lock installed by the Dockerfile

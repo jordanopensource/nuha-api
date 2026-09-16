@@ -1,17 +1,19 @@
-# Nuha API 2.0: one public api service backed by a models volume.
+# Nuha API 2.0 (nginx-edge variant): one stateless api service backed by a
+# models volume, fronted by an nginx proxy.
 #
-# The api mounts the volume read-only and scans it once at startup. Two
-# services write the volume, both running scripts/fetch_models.py: models-init
-# verifies and downloads models before the api starts on every `up`, and the
-# manual fetch service handles add, remove, and trial installs:
+# The api mounts the volume read-only and scans it once at startup. Two services
+# write the volume, both running scripts/fetch_models.py: models-init verifies
+# and downloads models before the api starts on every `up`, and the manual fetch
+# service handles add, remove, and trial installs:
 #
 #   docker compose run --rm fetch add <code>     # or: add --all / remove <code>
 #   docker compose restart api
 #
-# The served dialect set comes from the volume's contents; changing it needs
-# no rebuild and no edit here. Compose only reports health (a hung-but-alive
-# container needs operator action); TLS and rate limiting belong to the
-# platform edge.
+# The served dialect set comes from the volume's contents; changing it needs no
+# rebuild and no edit here. The `proxy` service is the published entry point and
+# provides the edge concerns (a TLS termination point, per-IP rate limiting, a
+# body cap, security headers) for a deployment that has no edge of its own; on a
+# platform that provides one, drop the proxy and point that edge at the api.
 name: nuha-api
 
 services:
@@ -36,8 +38,9 @@ services:
         required: false
     environment:
       - MODELS_DIR=/models
-    ports:
-      - "${PORT:-8000}:8000"
+    # No host port: the proxy below is the only published entry point. Reach the
+    # api directly (bypassing the proxy) with `docker compose port api 8000` or
+    # by adding a ports mapping here.
     volumes:
       - models:/models:ro
     # The initContainer pattern: the api is not created until models-init has
@@ -70,6 +73,41 @@ services:
           # raise API_MEM_LIMIT with it.
           cpus: "${API_CPU_LIMIT:-3.0}"
           memory: ${API_MEM_LIMIT:-10g}
+
+  # Edge proxy in front of the one api: TLS termination point (add a 443 listener
+  # and mount certs), per-IP and per-peer rate limiting, a body cap, and security
+  # headers. The api owns dialect validation and its dynamic dialect set, so this
+  # proxy carries no per-dialect config and a runtime-added dialect needs no
+  # change here. It is the only published entry point; on a platform that already
+  # has an edge (a load balancer, for instance), run without this service and
+  # point that edge at the api.
+  proxy:
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    restart: unless-stopped
+    # Drain in lockstep with the api it fronts: on stop, nginx forwards SIGQUIT to
+    # its workers (needs CAP_KILL below) so they finish in-flight requests. Match
+    # the api's window so a proxied request still being served can complete.
+    stop_grace_period: 160s
+    cap_drop: [ALL]
+    # nginx's official image runs a root master that chowns its cache and temp
+    # paths, drops the workers to the nginx user, and forwards SIGQUIT to them for
+    # a graceful drain. cap_drop ALL removes what it needs, so add back exactly
+    # those four (it binds 8000, so no NET_BIND_SERVICE is needed).
+    cap_add: [CHOWN, SETGID, SETUID, KILL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "${PROXY_CPU_LIMIT:-1.0}"
+          memory: ${PROXY_MEM_LIMIT:-256m}
 
   # Init: runs before the api on every `up`, verifying each shipped dialect's
   # install and downloading only what is missing or broken (no network when
