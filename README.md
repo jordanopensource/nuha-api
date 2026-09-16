@@ -69,11 +69,11 @@ its labels. The application code carries no hardcoded dialect knowledge.
 
 ## Dialects and models
 
-| Code  | Dialect         | Model       | HuggingFace repo          | Response languages |
-|-------|-----------------|-------------|---------------------------|--------------------|
-| `arz` | Egyptian Arabic | BERT        | `thejosango/nuha-arz-sub-onnx` | `ar`, `en`         |
-| `acm` | Iraqi Arabic    | BERT        | `thejosango/safa-acm-sub-onnx` | `ar`, `en`, `ckb`  |
-| `ckb` | Sorani Kurdish  | XLM-RoBERTa | `thejosango/safa-ckb-sub-onnx` | `ar`, `en`, `ckb`  |
+| Code  | Dialect         | Model                        | HuggingFace repo                       | Response languages |
+|-------|-----------------|------------------------------|----------------------------------------|--------------------|
+| `arz` | Egyptian Arabic | BERT, single model           | `thejosango/nuha-arz-sub-onnx`         | `ar`, `en`         |
+| `acm` | Iraqi Arabic    | 4-model logit-mean ensemble  | `thejosango/safa-acm-sub-onnx-ensemble` | `ar`, `en`, `ckb`  |
+| `ckb` | Sorani Kurdish  | 4-model logit-mean ensemble  | `thejosango/safa-ckb-sub-onnx-ensemble` | `ar`, `en`, `ckb`  |
 
 The dialect codes are [ISO 639-3](https://iso639-3.sil.org/) language codes:
 `arz` (Egyptian Arabic), `acm` (Mesopotamian/Iraqi Arabic), and `ckb` (Central
@@ -92,13 +92,32 @@ Iraqi and Kurdish share one preprocessing function; the differences (Iraqi
 decodes leetspeak and normalizes ى to ي, Kurdish does neither) are two boolean
 flags in the dialect files.
 
+### Single models and ensembles
+
+A dialect is always one `hf_repo`. Whether that repo serves a single model or an
+ensemble is a property of its snapshot, not of the dialect file: a single-model
+snapshot has one `model.onnx` at the top; an ensemble snapshot has a `members/`
+subdirectory with one complete model directory (its own graph and tokenizer) per
+member. The runtime tells the two apart by that directory on the volume and
+treats a single model as an ensemble of one, so nothing on the request path
+branches on the shape.
+
+Iraqi and Kurdish serve four-member ensembles. Each member runs on its own
+tokenizer and graph (the members can be different architectures), the raw logits
+are averaged with equal weight, and the argmax over that mean is the prediction.
+Kurdish also adds a fixed per-class bias to the mean before the argmax; the bias
+vector lives in the dialect file's `aggregation` block (not in a sidecar in the
+snapshot), so it is reviewed and versioned with the rest of the config. A
+member's memory and latency cost is real: a loaded ensemble is the sum of its
+members, and one inference slot now runs one forward pass per member.
+
 ## Running it
 
 ### The full stack with Docker Compose
 
 ```bash
-# Optional: copy the sample env if you want to override any defaults.
-# Every variable already has a sensible default, so this step is optional.
+# Optional: every variable already has a sensible default, so copy this only to
+# override one.
 cp .sample.env .env
 
 # Build the one image and bring the stack up. The models-init service runs
@@ -449,8 +468,11 @@ protected is the process's CPU, not a per-dialect budget. The queue smooths
 bursts within capacity; it does not add throughput, so scale with replicas to
 raise the ceiling. There is also a per-request timeout: an inference that runs
 past `INFERENCE_TIMEOUT` returns a 504. That ceiling exists for work that is
-genuinely stuck; a full 1000-text batch is a single inference that can take
-tens of seconds on a 2-CPU cap, and the default 120s leaves wide margin.
+genuinely stuck; a full 1000-text batch is one forward pass per member (four for
+the shipped ensembles) run sequentially in the slot, so it can take tens of
+seconds on a 2-CPU cap, and the default 120s leaves margin. Size it above the
+worst-case batch on your hardware, remembering an ensemble multiplies that by
+its member count.
 
 Uvicorn worker processes are fixed at 1 in the image entrypoint (there is no
 `WORKERS` variable). The model forward pass releases the GIL, so one process
@@ -462,13 +484,15 @@ container, and scale with replicas beyond that.
 ### Memory
 
 One process holds every loaded model, so the container's footprint is the SUM
-of the models on the volume: under a heavy stress load the real peaks are
-around 1.5 GiB for the BERT dialects (`arz`, `acm`) and a bit over 2 GiB for
-`ckb` (XLM-RoBERTa has a larger multilingual embedding matrix), so the shipped
-three peak near 5-6 GiB together plus the web stack and in-flight bodies. The
+of the models on the volume, and an ensemble dialect is the sum of its members.
+The shipped set is one single-model dialect (`arz`, a BERT, ~0.5 GiB) and two
+four-member ensembles (`acm`, four fp16 members ~1.2 GiB total; `ckb`, four int8
+members ~1.25 GiB total). With all three loaded the api's resident set is around
+3.8 GiB (measured under load), plus the web stack and in-flight bodies. The
 `API_MEM_LIMIT` default (10g) is a comfortable ceiling, not a reservation;
-`compose.dev.yml` caps it at 7g for an 8 GiB host. Installing more dialects
-raises the real footprint: raise the limit with the volume.
+`compose.dev.yml` caps it at 7g for an 8 GiB host. Installing more dialects, or
+swapping a single model for an ensemble, raises the real footprint: raise the
+limit with the volume.
 
 ### Scaling
 
@@ -498,6 +522,13 @@ application code, images, compose, and CI stay untouched.
    `app/dialects/<code>.json` as a starting point. For a dialect the repo
    should ship, commit it under `app/dialects/` (the `validate-dialects`
    pre-commit hook checks it structurally); for a trial, any local file works.
+
+   An ensemble needs no extra config here: point `hf_repo` at a repo whose
+   snapshot ships a `members/` tree and the runtime serves it as an ensemble.
+   The optional `aggregation` block tunes how the members combine: `method`
+   names the combine function (the default is the equal-weight logit mean) and
+   `bias` is a per-sub-class vector added to the combined logits before the
+   argmax. A `bias` must have one entry per sub class; the schema checks that.
 2. Install it and restart:
 
    ```bash
@@ -509,10 +540,11 @@ application code, images, compose, and CI stay untouched.
 The fetch command validates the config against the shared schema BEFORE
 downloading, and the startup scan revalidates on load, so a broken file never
 serves. The only time you touch Python is if the dialect needs a brand new
-preprocessing family. In that case add a function to `_PREPROCESS_REGISTRY` in
-`app/classifier.py` and reference it by name in the dialect file's
-`preprocessing.type`. The existing `nuha` and `safa` preprocessors cover the
-current dialects.
+preprocessing family or a new combine method. In that case add a function to
+`_PREPROCESS_REGISTRY` (or `_COMBINE_REGISTRY`) in `app/classifier.py` and
+reference it by name in the dialect file's `preprocessing.type` (or
+`aggregation.method`). The existing `nuha`/`safa` preprocessors and the
+`logit_mean` combine cover the current dialects.
 
 ## Build
 
@@ -577,8 +609,10 @@ app/
                        (dialect_schema.py, the single definition)
   dialects/            One reviewed file per dialect (arz/acm/ckb).json: name,
                        hf_repo, languages (each with a display name and
-                       aliases), preprocessing, and labels. The fetch command's
-                       install source; the runtime reads the volume's copies.
+                       aliases), preprocessing, labels, and an optional
+                       aggregation block (ensemble combine + bias). The fetch
+                       command's install source; the runtime reads the volume's
+                       copies.
 tests/                 pytest suite (the ML imports are mocked; one run)
 scripts/
   fetch_models.py      Install/ensure/remove/list models on the volume (the
