@@ -219,4 +219,91 @@ class TestLoadedEntry:
         registry.scan_once(volume)
         a, b = (registry.get(c) for c in sorted(ALL_DIALECTS)[:2])
         assert a.cache is not b.cache
-        assert a.tokenizer_lock is not b.tokenizer_lock
+        assert a.members[0].tokenizer_lock is not b.members[0].tokenizer_lock
+
+
+# =============================================================================
+# Ensembles: discovered by the members/ subdir, loaded as one unit
+# =============================================================================
+
+
+class TestScanEnsemble:
+    """A dialect directory with a members/ subdir is an ensemble: each child is a
+    complete model dir. Detection is by that layout (not the dialect file, which
+    carries only an hf_repo), the whole dialect fails as a unit if any member is
+    broken, and its declared aggregation (combine method + bias) rides on the
+    loaded bundle."""
+
+    @staticmethod
+    def _base():
+        from tests.conftest import _DIALECT_FILES
+
+        return _DIALECT_FILES[sorted(_DIALECT_FILES)[0]]
+
+    def _write(self, root, code="ens", member_names=("m1", "m2"), bias=None, method=None):
+        from tests.conftest import with_aggregation, write_dialect_dir
+
+        cfg = with_aggregation(self._base(), bias=bias, method=method)
+        root.mkdir(parents=True, exist_ok=True)
+        write_dialect_dir(root, code, cfg, member_names=member_names)
+        return cfg
+
+    def test_scan_loads_an_ensemble_by_members_dir(self, tmp_path):
+        volume = tmp_path / "models"
+        self._write(volume, member_names=("marbert", "arbert", "camelbert"))
+        result = registry.scan_once(volume)
+        assert result.loaded == ["ens"] and result.failed == []
+        entry = registry.get("ens")
+        assert len(entry.members) == 3  # one loaded member per members/<name>/
+        assert entry.bias is None  # no aggregation.bias declared
+
+    def test_declared_bias_rides_on_the_bundle(self, tmp_path):
+        import numpy as np
+
+        n = len(self._base()["labels"]["sub_to_main"])
+        bias = [round(0.1 * i - 0.3, 2) for i in range(n)]
+        volume = tmp_path / "models"
+        self._write(volume, bias=bias)
+        registry.scan_once(volume)
+        entry = registry.get("ens")
+        assert entry.bias is not None and entry.bias.shape == (n,)
+        assert np.allclose(entry.bias, np.asarray(bias, dtype="float32"))
+
+    def test_broken_member_fails_the_dialect_not_its_siblings(self, tmp_path):
+        volume = make_model_volume(tmp_path / "models")  # the flat single-model siblings
+        self._write(volume, member_names=("good", "bad"))
+        (volume / "ens" / "members" / "bad" / "model.onnx").unlink()
+        result = registry.scan_once(volume)
+        assert "ens" in result.failed
+        assert registry.codes() == frozenset(ALL_DIALECTS)  # siblings unaffected
+
+    def test_empty_members_dir_fails(self, tmp_path):
+        from app.common.dialect_schema import MEMBERS_DIRNAME
+        from tests.conftest import write_dialect_dir
+
+        volume = tmp_path / "models"
+        write_dialect_dir(volume, "ens", self._base())  # flat dialect.json + a unit
+        (volume / "ens" / "model.onnx").unlink()  # drop the flat graph
+        (volume / "ens" / MEMBERS_DIRNAME).mkdir()  # a members/ dir with no members
+        result = registry.scan_once(volume)
+        assert "ens" in result.failed
+
+    def test_unknown_combine_method_fails_at_load(self, tmp_path):
+        """The schema does not know the combine registry (adding a method is a
+        code-only change), so an unknown method passes validation and fails when
+        the engine resolves it at load."""
+        volume = tmp_path / "models"
+        self._write(volume, method="no-such-method")
+        result = registry.scan_once(volume)
+        assert "ens" in result.failed
+
+    def test_too_many_members_fails(self, tmp_path, monkeypatch):
+        """One request runs every member on its slot, so a directory with more
+        members than the cap is treated as mis-packaged and stays out of service."""
+        import app.classifier as clf
+
+        monkeypatch.setattr(clf, "_MAX_MEMBERS", 2)
+        volume = tmp_path / "models"
+        self._write(volume, member_names=("m1", "m2", "m3"))  # 3 > cap of 2
+        result = registry.scan_once(volume)
+        assert "ens" in result.failed
