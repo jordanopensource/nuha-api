@@ -2,9 +2,10 @@
 Runtime model registry: which dialects this process serves.
 
 The models directory (MODELS_DIR, a Docker volume in deployment) holds one
-subdirectory per dialect: <code>/dialect.json plus the model snapshot. The
-lifespan scans it once at startup; operators change the volume with
-scripts/fetch_models.py and restart the api service to pick it up.
+subdirectory per dialect: <code>/dialect.json plus its model snapshot (or a
+members/ subdirectory of snapshots for an ensemble). The lifespan scans it once
+at startup; operators change the volume with scripts/fetch_models.py and restart
+the api service to pick it up.
 
 A scan builds a fresh {code: LoadedDialect} dict and rebinds the module global
 in one step, so readers only ever see a complete registry. Each dialect loads

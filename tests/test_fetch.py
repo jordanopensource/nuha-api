@@ -70,6 +70,20 @@ def hub(monkeypatch):
     return module
 
 
+@pytest.fixture
+def any_dialect():
+    """These tests assert the single-model install shape (a flat model.onnx and a
+    {hf_repo, revision, pinned} record); pick a single-model dialect
+    positionally. Ensembles are exercised in TestEnsembleFetch below. Overrides
+    the conftest fixture for this module only."""
+    from tests.conftest import _DIALECT_FILES
+
+    singles = sorted(code for code, cfg in _DIALECT_FILES.items() if "hf_repo" in cfg)
+    if not singles:
+        pytest.skip("no single-model dialect to exercise the flat-layout fetch paths")
+    return singles[0]
+
+
 class TestAdd:
     def test_add_installs_via_staging_and_rename(self, models_dir, hub, any_dialect):
         fetch.main(["add", any_dialect])
@@ -137,7 +151,7 @@ class TestAdd:
             (Path(local_dir) / "tokenizer.json").write_text("{}")
 
         hub.snapshot_download.side_effect = no_onnx
-        with pytest.raises(SystemExit, match="no single ONNX graph"):
+        with pytest.raises(SystemExit, match="incomplete"):
             fetch.main(["add", any_dialect])
         assert not (models_dir / any_dialect).exists()
         assert not list(models_dir.glob(".staging-*"))
@@ -345,3 +359,153 @@ class TestList:
         out = capsys.readouterr().out
         assert any_dialect in out
         assert "shipped configs" in out
+
+
+class TestEnsembleFetch:
+    """An ensemble is ONE repo whose snapshot carries a members/ tree. fetch
+    installs it like any other repo (one snapshot, one revision record); the
+    completeness and graph checks accept the members/ layout, so nothing here is
+    ensemble-specific except the snapshot the mock lays down."""
+
+    MEMBERS = ("s42", "s43", "saudibert")
+
+    def _ensemble_file(self, tmp_path, base_dialect, bias=None):
+        """A normal single-hf_repo dialect file (optionally with a bias); the
+        ensemble-ness comes from what the repo's snapshot contains, not the file."""
+        from tests.conftest import _dialect_file, with_aggregation
+
+        base = json.loads(_dialect_file(base_dialect).read_text(encoding="utf-8"))
+        cfg = with_aggregation(base, bias=bias)
+        path = tmp_path / "ens.json"
+        path.write_text(json.dumps(cfg), encoding="utf-8")
+        return cfg, path
+
+    def _snap_members(self, member_names=MEMBERS):
+        """A snapshot_download that lays down a members/ tree with a MANIFEST, the
+        shape an ensemble repo's snapshot has on the hub."""
+
+        def snap(repo_id, local_dir, revision=None):
+            from pathlib import Path
+
+            root = Path(local_dir)
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "MANIFEST.json").write_text("{}")
+            for name in member_names:
+                unit = root / "members" / name
+                unit.mkdir(parents=True, exist_ok=True)
+                (unit / "model.onnx").write_bytes(b"graph")
+                (unit / "tokenizer.json").write_text("{}")
+
+        return snap
+
+    def test_add_installs_the_members_tree(self, models_dir, hub, tmp_path, any_dialect):
+        cfg, path = self._ensemble_file(tmp_path, any_dialect)
+        hub.snapshot_download.side_effect = self._snap_members()
+        fetch.main(["add", "ens", "--file", str(path)])
+        target = models_dir / "ens"
+        assert (target / "dialect.json").is_file()
+        assert not (target / "model.onnx").exists()  # no flat graph for an ensemble
+        for name in self.MEMBERS:
+            assert (target / "members" / name / "model.onnx").is_file()
+        record = json.loads((target / ".install.json").read_text())
+        assert record == {"hf_repo": cfg["hf_repo"], "revision": hub.head, "pinned": False}
+        assert hub.snapshot_download.call_count == 1  # one repo, one snapshot
+
+    def test_installed_config_round_trips(self, models_dir, hub, tmp_path, any_dialect):
+        cfg, path = self._ensemble_file(tmp_path, any_dialect)
+        hub.snapshot_download.side_effect = self._snap_members()
+        fetch.main(["add", "ens", "--file", str(path)])
+        installed = json.loads((models_dir / "ens" / "dialect.json").read_text())
+        assert installed == cfg
+
+    def test_snapshot_with_a_graphless_member_is_refused(
+        self, models_dir, hub, tmp_path, any_dialect
+    ):
+        """A members/ tree where a member ships no ONNX graph is incomplete, so
+        nothing activates."""
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+
+        def snap(repo_id, local_dir, revision=None):
+            from pathlib import Path
+
+            root = Path(local_dir)
+            for name in ("ok", "bad"):
+                unit = root / "members" / name
+                unit.mkdir(parents=True, exist_ok=True)
+                (unit / "tokenizer.json").write_text("{}")
+                if name == "ok":
+                    (unit / "model.onnx").write_bytes(b"graph")
+
+        hub.snapshot_download.side_effect = snap
+        with pytest.raises(SystemExit, match="incomplete"):
+            fetch.main(["add", "ens", "--file", str(path)])
+        assert not (models_dir / "ens").exists()
+        assert not list(models_dir.glob(".staging-*"))
+
+    def test_member_without_tokenizer_is_refused(self, models_dir, hub, tmp_path, any_dialect):
+        """install activates only what the api can load: a member with a graph but
+        no tokenizer is incomplete (AutoTokenizer.from_pretrained would fail it),
+        so `add` must refuse rather than report a success the api then rejects."""
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+
+        def snap(repo_id, local_dir, revision=None):
+            from pathlib import Path
+
+            root = Path(local_dir)
+            for name in ("ok", "bad"):
+                unit = root / "members" / name
+                unit.mkdir(parents=True, exist_ok=True)
+                (unit / "model.onnx").write_bytes(b"graph")
+                if name == "ok":  # the 'bad' member ships no tokenizer artifact
+                    (unit / "tokenizer.json").write_text("{}")
+
+        hub.snapshot_download.side_effect = snap
+        with pytest.raises(SystemExit, match="incomplete"):
+            fetch.main(["add", "ens", "--file", str(path)])
+        assert not (models_dir / "ens").exists()
+
+    def test_empty_members_dir_is_incomplete(self, models_dir, hub, tmp_path, any_dialect):
+        """A present-but-empty members/ dir is authoritative and incomplete (it
+        mirrors the engine, which hard-fails it), NOT a fall back to a flat model
+        at the root, so `add` refuses even if a stray flat graph is present."""
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+
+        def snap(repo_id, local_dir, revision=None):
+            from pathlib import Path
+
+            root = Path(local_dir)
+            (root / "members").mkdir(parents=True, exist_ok=True)  # present but empty
+            (root / "model.onnx").write_bytes(b"graph")  # a stray flat graph
+            (root / "tokenizer.json").write_text("{}")
+
+        hub.snapshot_download.side_effect = snap
+        with pytest.raises(SystemExit, match="incomplete"):
+            fetch.main(["add", "ens", "--file", str(path)])
+        assert not (models_dir / "ens").exists()
+
+    def test_ensure_verifies_complete_ensemble_without_network(
+        self, models_dir, hub, tmp_path, any_dialect
+    ):
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+        hub.snapshot_download.side_effect = self._snap_members()
+        fetch.main(["add", "ens", "--file", str(path)])
+        hub.snapshot_download.reset_mock()
+        fetch.main(["ensure", "ens", "--file", str(path)])
+        hub.snapshot_download.assert_not_called()
+
+    def test_ensure_heals_a_broken_member(self, models_dir, hub, tmp_path, any_dialect):
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+        hub.snapshot_download.side_effect = self._snap_members()
+        fetch.main(["add", "ens", "--file", str(path)])
+        (models_dir / "ens" / "members" / self.MEMBERS[0] / "model.onnx").unlink()
+        hub.snapshot_download.reset_mock()
+        fetch.main(["ensure", "ens", "--file", str(path)])
+        assert (models_dir / "ens" / "members" / self.MEMBERS[0] / "model.onnx").is_file()
+        assert hub.snapshot_download.call_count == 1  # one repo re-snapshot heals every member
+
+    def test_remove_deletes_the_whole_ensemble(self, models_dir, hub, tmp_path, any_dialect):
+        _cfg, path = self._ensemble_file(tmp_path, any_dialect)
+        hub.snapshot_download.side_effect = self._snap_members()
+        fetch.main(["add", "ens", "--file", str(path)])
+        fetch.main(["remove", "ens"])
+        assert not (models_dir / "ens").exists()

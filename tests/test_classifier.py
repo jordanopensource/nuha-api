@@ -32,14 +32,35 @@ class TestParseDialectDir:
         from app.classifier import parse_dialect_dir
 
         volume = make_model_volume(tmp_path / "models", codes=(code,))
-        cfg, config, onnx_path = parse_dialect_dir(code, volume / code)
+        cfg, config, member_dirs = parse_dialect_dir(code, volume / code)
         assert config.name == cfg["name"]
         assert callable(config.preprocess_fn)
         assert config.sub_to_main
         assert config.sub_labels and config.main_labels
         for lang_map in (*config.sub_labels.values(), *config.main_labels.values()):
             assert lang_map
-        assert onnx_path == volume / code / "model.onnx"
+        # parse returns one (member dir, onnx path) pair per model unit; a flat
+        # single-model snapshot has exactly one, the dialect directory itself.
+        assert member_dirs == [(volume / code, volume / code / "model.onnx")]
+
+    def test_ensemble_dir_returns_one_pair_per_member(self, tmp_path, any_dialect):
+        """A members/ subdir makes it an ensemble: one (dir, onnx) pair per member,
+        discovered from the layout, not the dialect file."""
+        from app.classifier import parse_dialect_dir
+        from app.common.dialect_schema import MEMBERS_DIRNAME
+        from tests.conftest import _DIALECT_FILES, write_dialect_dir
+
+        names = ("s42", "s43", "saudibert")
+        write_dialect_dir(tmp_path / "models", any_dialect, _DIALECT_FILES[any_dialect], names)
+        _cfg, _config, member_dirs = parse_dialect_dir(
+            any_dialect, tmp_path / "models" / any_dialect
+        )
+        got = {d.name for d, _onnx in member_dirs}
+        assert got == set(names)
+        base = tmp_path / "models" / any_dialect / MEMBERS_DIRNAME
+        assert member_dirs == sorted(
+            ((base / n, base / n / "model.onnx") for n in names), key=lambda pair: pair[0].name
+        )
 
     def test_schema_problems_raise(self, tmp_path, any_dialect):
         import json
@@ -667,23 +688,35 @@ def _make_loaded(session, input_names=("input_ids", "attention_mask"), max_lengt
     )
 
 
-def _make_entry(cfg, loaded, code="tst"):
-    """Wrap a config + loaded model into a LoadedDialect bundle with a fresh
-    per-entry cache and tokenizer lock. "tst" is a fabricated code no dialect
-    file declares, keeping the suite's no-hardcoded-dialects rule intact."""
+def _make_entry(cfg, loaded, code="tst", *, members=None, bias=None, combine=None):
+    """Wrap a config + loaded model(s) into a LoadedDialect bundle with a fresh
+    per-entry cache. By default ``loaded`` becomes the single member of a
+    single-model dialect (an identity logit_mean, no bias), numerically identical
+    to the pre-ensemble engine; pass ``members``/``bias``/``combine`` to build an
+    ensemble. "tst" is a fabricated code no dialect file declares, keeping the
+    suite's no-hardcoded-dialects rule intact."""
 
-    from app.classifier import InferenceCache, LoadedDialect
+    from app.classifier import (
+        DEFAULT_COMBINE,
+        InferenceCache,
+        LoadedDialect,
+        LoadedMember,
+        _build_combine_fn,
+    )
 
+    if members is None:
+        members = (LoadedMember(loaded=loaded, tokenizer_lock=threading.Lock()),)
     supported = frozenset(cfg.sub_labels)
     return LoadedDialect(
         code=code,
         config=cfg,
-        loaded=loaded,
+        members=tuple(members),
+        combine=combine or _build_combine_fn(DEFAULT_COMBINE),
+        bias=bias,
         supported_languages=supported,
         default_language=sorted(supported)[0],
         aliases={},
         cache=InferenceCache(64),
-        tokenizer_lock=threading.Lock(),
     )
 
 
@@ -983,6 +1016,148 @@ class TestPredictWithFakeSession:
         assert result_b.sub_class == "neutral"
 
 
+class TestEnsembleCombine:
+    """The combine registry and the logit-mean + bias math, in isolation.
+
+    Voting happens on raw logits, not softmax probabilities, and a single member
+    passes through unchanged, so the single-model path is the pre-ensemble path.
+    """
+
+    def test_default_is_logit_mean(self):
+        from app.classifier import DEFAULT_COMBINE
+
+        assert DEFAULT_COMBINE == "logit_mean"
+
+    def test_unknown_combine_method_raises(self):
+        from app.classifier import _build_combine_fn
+
+        with pytest.raises(RuntimeError, match="Unknown combine method"):
+            _build_combine_fn("no-such-method")
+
+    def test_logit_mean_averages_members(self):
+        import numpy as np
+
+        from app.classifier import _build_combine_fn
+
+        combine = _build_combine_fn("logit_mean")
+        out = combine([np.array([[3.0, 0.0]]), np.array([[1.0, 0.0]])])
+        assert out.tolist() == [[2.0, 0.0]]
+
+    def test_logit_mean_of_one_is_identity(self):
+        """A single member's logits pass through unchanged (same values, same
+        dtype), so an ensemble of one is numerically the old single-model path."""
+        import numpy as np
+
+        from app.classifier import _build_combine_fn
+
+        logits = np.array([[0.1, 9.0, -3.0]], dtype="float32")
+        out = _build_combine_fn("logit_mean")([logits])
+        assert out.dtype == logits.dtype
+        assert np.array_equal(out, logits)
+
+    def test_build_bias_length_checked_and_typed(self):
+        import numpy as np
+
+        from app.classifier import _build_bias
+
+        bias = _build_bias("tst", {"aggregation": {"bias": [0.5, -0.5]}}, 2)
+        assert bias.tolist() == [0.5, -0.5]
+        assert bias.dtype == np.float32  # matches the ONNX logits' dtype
+        assert _build_bias("tst", {}, 2) is None  # no aggregation -> no bias
+        with pytest.raises(RuntimeError, match="sub-classes"):
+            _build_bias("tst", {"aggregation": {"bias": [0.1]}}, 2)  # wrong length
+        with pytest.raises(RuntimeError, match="non-finite"):
+            _build_bias("tst", {"aggregation": {"bias": [0.1, float("inf")]}}, 2)  # NaN/Inf
+
+
+class TestEnsemblePredict:
+    """_predict_single/_predict_batch over an ensemble of fake sessions: member
+    logits are averaged (soft voting), an optional bias shifts the argmax, every
+    member runs once per inference, and the confidence is softmax(mean+bias)."""
+
+    def _cfg(self):
+        from app.classifier import DialectConfig
+
+        return DialectConfig(
+            name="ensemble-test",
+            preprocess_fn=lambda x: x.strip(),
+            sub_to_main={0: 0, 1: 1},
+            sub_labels={"ara": {0: "neutral", 1: "violence"}},
+            main_labels={"ara": {0: "neutral_m", 1: "violence_m"}},
+        )
+
+    def _member(self, logits):
+        from app.classifier import LoadedMember
+
+        return LoadedMember(
+            loaded=_make_loaded(_FakeSession(logits)), tokenizer_lock=threading.Lock()
+        )
+
+    def test_soft_vote_over_logits_beats_majority(self):
+        """Two members argmax to different classes; the mean of the logits, not a
+        class vote, decides. [0,4] and [3,0] mean to [1.5,2.0] -> class 1."""
+        from app.classifier import _predict_single
+
+        entry = _make_entry(
+            self._cfg(),
+            None,
+            members=(self._member([[0.0, 4.0]]), self._member([[3.0, 0.0]])),
+        )
+        assert _predict_single("نص", entry, "ara").sub_class == "violence"
+
+    def test_confidence_is_softmax_of_mean_logits(self):
+        import numpy as np
+
+        from app.classifier import _predict_single, _softmax_argmax
+
+        entry = _make_entry(
+            self._cfg(),
+            None,
+            members=(self._member([[3.0, 0.0]]), self._member([[1.0, 0.0]])),
+        )
+        result = _predict_single("نص", entry, "ara")
+        expected_conf, _ = _softmax_argmax(np.array([[2.0, 0.0]]))
+        assert result.sub_class == "neutral"
+        assert result.confidence == round(float(expected_conf[0]), 4)
+
+    def test_bias_shifts_the_argmax(self):
+        import numpy as np
+
+        from app.classifier import _predict_single, _softmax_argmax
+
+        # The lone member's logits [0.0, 0.1] alone pick class 1; a +1.0 bias on
+        # class 0 makes the biased logits [1.0, 0.1] pick class 0 instead.
+        bias = np.asarray([1.0, 0.0], dtype="float32")
+        entry = _make_entry(self._cfg(), None, members=(self._member([[0.0, 0.1]]),), bias=bias)
+        result = _predict_single("نص", entry, "ara")
+        expected_conf, _ = _softmax_argmax(np.array([[1.0, 0.1]]))
+        assert result.sub_class == "neutral"
+        assert result.confidence == round(float(expected_conf[0]), 4)
+
+    def test_each_member_runs_once_per_inference(self):
+        """A slot now costs one forward pass per member: two members, two run()s."""
+        from app.classifier import _predict_single
+
+        m1, m2 = self._member([[3.0, 0.0]]), self._member([[1.0, 0.0]])
+        _predict_single("نص", _make_entry(self._cfg(), None, members=(m1, m2)), "ara")
+        assert len(m1.loaded.session.calls) == 1
+        assert len(m2.loaded.session.calls) == 1
+
+    def test_batch_averages_each_row(self):
+        from app.classifier import _predict_batch
+
+        entry = _make_entry(
+            self._cfg(),
+            None,
+            members=(
+                self._member([[3.0, 0.0], [0.0, 3.0]]),
+                self._member([[1.0, 0.0], [0.0, 1.0]]),
+            ),
+        )
+        results = _predict_batch(["نص اول", "نص ثاني"], entry, "ara")
+        assert [r.sub_class for r in results] == ["neutral", "violence"]
+
+
 class TestTokenizerSerialization:
     """Regression: tokenizer calls are serialized across worker threads.
 
@@ -991,7 +1166,7 @@ class TestTokenizerSerialization:
     path (padding=True) calling it from two pool threads at once is the
     "RuntimeError: Already borrowed" race (huggingface/tokenizers#537).
     _predict_single/_predict_batch must never be inside the tokenizer
-    concurrently (the per-dialect tokenizer_lock on LoadedDialect). Inference
+    concurrently (the per-member tokenizer_lock on LoadedMember). Inference
     itself stays parallel; only tokenization is serialized.
     """
 
@@ -1066,7 +1241,7 @@ class TestTokenizerSerialization:
         assert not errors, f"prediction raised under concurrency: {errors}"
         assert max_concurrent == 1, (
             f"{max_concurrent} threads were inside the tokenizer at once; "
-            f"tokenization must be serialized (see LoadedDialect.tokenizer_lock)"
+            f"tokenization must be serialized (see LoadedMember.tokenizer_lock)"
         )
 
 

@@ -1,14 +1,18 @@
 """
 Text classification engine.
 
-Everything about running ONE dialect's model: preprocessing, the ONNX session,
-the inference cache, the admission gate, the tokenizer lock, and label lookup.
-A dialect arrives as a directory (dialect.json + an ONNX snapshot) and
-``load_dialect_dir`` turns it into a self-contained ``LoadedDialect`` bundle;
-app/registry.py discovers those directories on the models volume at startup and
-app/main.py routes requests to the bundles. The gate and the executor are
-process-global on purpose: CLASSIFIER_WORKERS is the process's inference
-capacity, shared by every loaded dialect.
+Everything about running ONE dialect: preprocessing, the ONNX session(s), the
+inference cache, the admission gate, the tokenizer lock(s), and label lookup. A
+dialect is one or more models: a single-model dialect has one, an ensemble has
+several members whose logits are combined (an equal-weight mean by default) with
+an optional per-class bias before the argmax. A dialect arrives as a directory
+(dialect.json plus one model snapshot, or a members/ subdir with one snapshot
+each) and ``load_dialect_dir`` turns it into a self-contained ``LoadedDialect``
+bundle; app/registry.py discovers those directories on the models volume at
+startup and app/main.py routes requests to the bundles. A single model is served
+as an ensemble of one, so the request path never branches on the shape. The gate
+and the executor are process-global on purpose: CLASSIFIER_WORKERS is the
+process's inference capacity, shared by every loaded dialect.
 """
 
 import asyncio
@@ -28,7 +32,7 @@ import onnxruntime as ort
 from transformers import AutoTokenizer
 
 from app.common.config import parse_bounded_int
-from app.common.dialect_schema import validate_dialect_config
+from app.common.dialect_schema import MEMBERS_DIRNAME, validate_dialect_config
 from app.common.logging import setup_logging
 from app.common.schemas import TEXT_MAX_LEN
 
@@ -265,26 +269,43 @@ class DialectConfig:
 
 
 @dataclass(frozen=True)
+class LoadedMember:
+    """One model of a dialect: a single-model dialect has one member, an
+    ensemble has several. Each member carries its own loaded model (its own
+    ONNX session, tokenizer, and max_length, since members can differ in
+    architecture) and its own tokenizer lock, because the fast-tokenizer borrow
+    race is per Rust object and each member wraps a different one.
+    """
+
+    loaded: LoadedModel
+    tokenizer_lock: threading.Lock
+
+
+@dataclass(frozen=True)
 class LoadedDialect:
     """One dialect, fully loaded and ready to serve.
 
     The whole per-dialect world lives here so the registry can swap dialects in
-    and out as opaque units: config and labels, the loaded model, the language
-    maps, an inference cache of its own (keys are preprocessed text, which two
-    dialects could share), and a tokenizer lock of its own (the fast-tokenizer
-    borrow race is per Rust object, so per-dialect locks avoid cross-dialect
-    contention). A request handler snapshots one of these by reference; the
-    bundle stays fully usable even if the registry has since dropped it.
+    and out as opaque units: config and labels, one or more model members, the
+    combine function that fuses their logits (a no-op reduction for a single
+    member), an optional per-sub-class bias added to the combined logits before
+    the argmax, the language maps, and an inference cache of its own (keys are
+    preprocessed text, which two dialects could share). A single model and an
+    ensemble differ only in ``len(members)`` and whether a bias is set; every
+    request path treats one model as an ensemble of one, so nothing branches on
+    the shape. A request handler snapshots one of these by reference; the bundle
+    stays fully usable even if the registry has since dropped it.
     """
 
     code: str
     config: DialectConfig
-    loaded: LoadedModel
+    members: tuple[LoadedMember, ...]
+    combine: Callable[[list["np.ndarray"]], "np.ndarray"]
+    bias: "np.ndarray | None"  # (num_labels,) added to combined logits, or None
     supported_languages: frozenset[str]
     default_language: str  # first declared canonical code, alphabetically
     aliases: dict[str, str]  # alias code -> canonical code (e.g. "ar" -> "ara")
     cache: InferenceCache
-    tokenizer_lock: threading.Lock
 
 
 def build_language_maps(languages_cfg: dict) -> tuple[frozenset[str], str, dict[str, str]]:
@@ -307,6 +328,51 @@ def build_language_maps(languages_cfg: dict) -> tuple[frozenset[str], str, dict[
 
 
 # -----------------------------------------------------------------------------
+# Ensemble combine methods (soft voting over raw logits)
+# -----------------------------------------------------------------------------
+#
+# A combine function fuses the members' logit matrices (each of shape
+# (batch, num_labels)) into one. The registry is dispatched by the dialect
+# file's ``aggregation.method`` exactly like the preprocessing registry, so a
+# new combine method is a code-only change a dialect selects by name. Voting
+# happens on the raw logits, not on softmax probabilities: the shipped ensembles
+# are logit-mean models, and averaging before the softmax is what their offline
+# selection measured. A single-model dialect is an ensemble of one, and every
+# method returns that member's own logits unchanged, so its numeric behavior is
+# identical to before ensembles existed.
+
+DEFAULT_COMBINE = "logit_mean"
+
+
+def _combine_logit_mean(member_logits: list[np.ndarray]) -> np.ndarray:
+    """The equal-weight mean of the members' raw logit matrices.
+
+    The reduction accumulates in float32 (``dtype=np.float32``): ensemble members
+    can be fp16 graphs (the shipped Iraqi models are), and averaging four fp16
+    logit rows in fp16 would shed precision the fp32 reference keeps. Passing the
+    dtype to ``mean`` upcasts inside the sum without materializing a second
+    float32 copy of the whole stack. For a single fp32 member the mean of one
+    matrix is exactly that matrix, so the single-model path stays untouched.
+    """
+    return np.mean(np.stack(member_logits, axis=0), axis=0, dtype=np.float32)
+
+
+_COMBINE_REGISTRY: dict[str, Callable[[list[np.ndarray]], np.ndarray]] = {
+    "logit_mean": _combine_logit_mean,
+}
+
+
+def _build_combine_fn(name: str) -> Callable[[list[np.ndarray]], np.ndarray]:
+    """Resolve a combine method name to its function, or fail the dialect's load."""
+    fn = _COMBINE_REGISTRY.get(name)
+    if fn is None:
+        raise RuntimeError(
+            f"Unknown combine method '{name}'. Known methods: {sorted(_COMBINE_REGISTRY)}"
+        )
+    return fn
+
+
+# -----------------------------------------------------------------------------
 # Text preprocessing
 # -----------------------------------------------------------------------------
 
@@ -326,6 +392,13 @@ _MAX_WORDS = 50
 # _load_model), keeping a hostile training_config.json from inflating
 # per-request tokenizer allocations.
 _MAX_TOKENIZER_LEN = 4096
+
+# Upper bound on ensemble members. One admitted request runs every member's
+# forward pass sequentially in its single slot, so the member count multiplies
+# per-request cost; this caps that amplification at load time (the shipped
+# ensembles have four). A directory with more members than this is treated as
+# mis-packaged and its dialect fails to load, staying out of service.
+_MAX_MEMBERS = 64
 
 # Iraqi-specific leetspeak substitution map
 _LEETSPEAK_MAP = {
@@ -488,14 +561,48 @@ def _find_onnx_file(path: Path) -> Path:
     return candidates[0]
 
 
-def parse_dialect_dir(code: str, path: Path) -> tuple[dict, DialectConfig, Path]:
+def _discover_member_dirs(path: Path) -> list[Path]:
+    """The model directories inside a dialect directory, one per ensemble member.
+
+    An ensemble install holds a ``members/`` subdirectory with one complete
+    model directory per member; a single-model install has none, and the dialect
+    directory itself is the one model directory. Detection is by the layout on
+    the volume, not by the dialect file, so the runtime serves whatever the
+    fetch command materialized. Members are returned sorted by name for a
+    deterministic order (dot-prefixed children, e.g. a half-written staging dir,
+    are skipped, mirroring how the top-level scanner ignores dotdirs).
+    """
+    members_root = path / MEMBERS_DIRNAME
+    if not members_root.is_dir():
+        return [path]
+    member_dirs = sorted(
+        child
+        for child in members_root.iterdir()
+        if child.is_dir() and not child.name.startswith(".")
+    )
+    if not member_dirs:
+        raise RuntimeError(
+            f"Ensemble dialect at {path} has a '{MEMBERS_DIRNAME}' directory but no "
+            f"member model directories inside it."
+        )
+    if len(member_dirs) > _MAX_MEMBERS:
+        raise RuntimeError(
+            f"Ensemble dialect at {path} declares {len(member_dirs)} members, over the "
+            f"cap of {_MAX_MEMBERS}; refusing to load it (one request runs every member)."
+        )
+    return member_dirs
+
+
+def parse_dialect_dir(code: str, path: Path) -> tuple[dict, DialectConfig, list[tuple[Path, Path]]]:
     """Parse and structurally validate one model directory, without touching ML.
 
     This is the completeness check the registry relies on: dialect.json must
-    parse, pass the shared schema validation, and the directory must hold
-    exactly one resolvable ONNX graph. Returns the raw config (for the language
-    maps), the built ``DialectConfig``, and the ONNX path. Raises RuntimeError
-    with every problem listed when the directory is not loadable.
+    parse and pass the shared schema validation, and every member directory (the
+    dialect directory itself for a single model, or each child of ``members/``
+    for an ensemble) must resolve to exactly one ONNX graph. Returns the raw
+    config (for the language maps and aggregation), the built ``DialectConfig``,
+    and a list of (member directory, ONNX path) pairs. Raises RuntimeError,
+    listing every problem, when the directory is not loadable.
     """
     cfg = _load_json(path / "dialect.json")
     problems = validate_dialect_config(code, cfg)
@@ -506,8 +613,10 @@ def parse_dialect_dir(code: str, path: Path) -> tuple[dict, DialectConfig, Path]
         preprocess_fn=_build_preprocess_fn(cfg["preprocessing"]),
         **_parse_dialect(cfg),
     )
-    onnx_path = _find_onnx_file(path)
-    return cfg, config, onnx_path
+    member_dirs = [
+        (member_dir, _find_onnx_file(member_dir)) for member_dir in _discover_member_dirs(path)
+    ]
+    return cfg, config, member_dirs
 
 
 def _load_model(path: Path, onnx_path: Path) -> LoadedModel:
@@ -632,28 +741,72 @@ def _self_test(loaded: LoadedModel) -> None:
     loaded.session.run(None, _build_onnx_inputs(loaded, tokenized))
 
 
+def _combine_method(cfg: dict) -> str:
+    """The combine method a dialect selects, defaulting when it declares none."""
+    aggregation = cfg.get("aggregation") or {}
+    return aggregation.get("method") or DEFAULT_COMBINE
+
+
+def _build_bias(code: str, cfg: dict, num_labels: int) -> np.ndarray | None:
+    """The per-sub-class bias added to the combined logits, or None when unset.
+
+    The schema already checks the vector's length against the declared
+    sub-classes; this re-checks against the loaded label count as a load-time
+    backstop (the volume's dialect.json is data, not reviewed code) and returns
+    it as float32 to match the ONNX logits' dtype, so a biased dialect stays in
+    one precision through the softmax.
+    """
+    aggregation = cfg.get("aggregation") or {}
+    raw = aggregation.get("bias")
+    if raw is None:
+        return None
+    bias = np.asarray(raw, dtype=np.float32)
+    if bias.shape != (num_labels,):
+        raise RuntimeError(
+            f"aggregation.bias for dialect '{code}' has shape {tuple(bias.shape)} but the "
+            f"labels declare {num_labels} sub-classes (expected a length-{num_labels} vector)."
+        )
+    # json.load accepts NaN/Infinity, and a non-finite bias would poison the
+    # softmax into NaN for every request; refuse it at load (the schema refuses
+    # it at commit and install, this is the load-time backstop on volume data).
+    if not np.isfinite(bias).all():
+        raise RuntimeError(
+            f"aggregation.bias for dialect '{code}' has a non-finite entry; "
+            f"the bias must be all finite numbers."
+        )
+    return bias
+
+
 def load_dialect_dir(code: str, path: Path) -> LoadedDialect:
     """Load one model directory into a ready-to-serve ``LoadedDialect``.
 
-    Parse and validate the directory, load the model, check the label/output
-    width, self-test the session, and assemble the per-dialect bundle. Any
-    failure raises; the registry treats that as "this dialect stays out" and
-    the other dialects are unaffected.
+    Parse and validate the directory, then for every member load the model,
+    check its output width against the declared labels, and self-test its
+    session; assemble the members, the combine function, and the optional bias
+    into the per-dialect bundle. Any failure raises; the registry treats that as
+    "this dialect stays out" and the other dialects are unaffected.
     """
-    cfg, config, onnx_path = parse_dialect_dir(code, path)
-    loaded = _load_model(path, onnx_path)
-    check_label_consistency(loaded, len(config.sub_to_main), code)
-    _self_test(loaded)
+    cfg, config, member_dirs = parse_dialect_dir(code, path)
+    num_labels = len(config.sub_to_main)
+    members: list[LoadedMember] = []
+    for member_dir, onnx_path in member_dirs:
+        loaded = _load_model(member_dir, onnx_path)
+        check_label_consistency(loaded, num_labels, code)
+        _self_test(loaded)
+        members.append(LoadedMember(loaded=loaded, tokenizer_lock=threading.Lock()))
+    combine = _build_combine_fn(_combine_method(cfg))
+    bias = _build_bias(code, cfg, num_labels)
     supported, default, aliases = build_language_maps(cfg["languages"])
     return LoadedDialect(
         code=code,
         config=config,
-        loaded=loaded,
+        members=tuple(members),
+        combine=combine,
+        bias=bias,
         supported_languages=supported,
         default_language=default,
         aliases=aliases,
         cache=InferenceCache(CACHE_SIZE),
-        tokenizer_lock=threading.Lock(),
     )
 
 
@@ -709,21 +862,65 @@ def _build_onnx_inputs(loaded: LoadedModel, tokenized: dict) -> dict[str, np.nda
 # Classification functions
 # -----------------------------------------------------------------------------
 
-# Tokenizer calls are serialized per dialect (LoadedDialect.tokenizer_lock). The
-# HF fast tokenizer wraps ONE Rust object and applies per-call truncation and
+# Tokenizer calls are serialized per member (LoadedMember.tokenizer_lock). The HF
+# fast tokenizer wraps ONE Rust object and applies per-call truncation and
 # padding by MUTATING its state before encoding; the single path uses
 # padding=False and the batch path padding=True, so two concurrent calls on the
 # same tokenizer can hit the classic "RuntimeError: Already borrowed" race
 # (huggingface/tokenizers#537), causing sporadic 500s under mixed single+batch
-# load. Tokenization is microseconds against an inference of tens of
-# milliseconds, so serializing it costs nothing observable; ONLY the tokenizer
-# call is under the lock; session.run() stays fully parallel.
+# load. Each member wraps a different tokenizer, so the lock is per member.
+# Tokenization is microseconds against an inference of tens of milliseconds, so
+# serializing it costs nothing observable; ONLY the tokenizer call is under the
+# lock; session.run() stays fully parallel.
+
+
+def _member_logits(member: LoadedMember, texts: list[str], *, padding: bool) -> np.ndarray:
+    """Tokenize ``texts`` with one member's own tokenizer and run its session,
+    returning that member's raw logit matrix (shape (len(texts), num_labels)).
+
+    Each member owns its tokenizer, max_length, and declared input names, so
+    members of different architectures run correctly side by side (a BERT graph
+    is fed token_type_ids, an XLM-R graph is not; any canonicalization the
+    member's tokenizer applies happens here, at tokenize time). The tokenizer
+    call is serialized on the member's own lock; the session run stays outside it
+    and fully parallel.
+    """
+    loaded = member.loaded
+    with member.tokenizer_lock:
+        tokenized = loaded.tokenizer(
+            texts,
+            truncation=True,
+            max_length=loaded.max_length,
+            padding=padding,
+            return_tensors="np",
+            # BERT graphs require token_type_ids; ask for it explicitly so the
+            # transformers 5.x fast tokenizer (which omits it by default) emits it.
+            return_token_type_ids="token_type_ids" in loaded.input_names,
+        )
+    feed = _build_onnx_inputs(loaded, tokenized)
+    return loaded.session.run(None, feed)[0]
+
+
+def _combined_logits(d: LoadedDialect, texts: list[str], *, padding: bool) -> np.ndarray:
+    """Run every member over ``texts`` and fuse them into one logit matrix.
+
+    Members run sequentially inside the caller's single inference slot (a slot
+    now costs one forward pass per member); their logits are combined by the
+    dialect's combine function, and the optional bias is added to the result
+    before the caller's softmax/argmax. For a single-model dialect this is one
+    forward pass, an identity combine, and no bias, so the result is exactly the
+    member's own logits.
+    """
+    per_member = [_member_logits(member, texts, padding=padding) for member in d.members]
+    combined = d.combine(per_member)
+    if d.bias is not None:
+        combined = combined + d.bias
+    return combined
 
 
 def _predict_single(text: str, d: LoadedDialect, lang: str) -> ClassificationResult:
     """Synchronous single prediction."""
     cfg = d.config
-    loaded = d.loaded
     cleaned = cfg.preprocess_fn(text)
 
     if not cleaned:
@@ -736,25 +933,13 @@ def _predict_single(text: str, d: LoadedDialect, lang: str) -> ClassificationRes
     if cached is not None:
         predicted_id, confidence_val = cached
     else:
-        with d.tokenizer_lock:
-            tokenized = loaded.tokenizer(
-                cleaned,
-                truncation=True,
-                max_length=loaded.max_length,
-                # No padding for a single sequence: pad to nothing, so a short text
-                # costs only its real token count instead of a fixed max_length (128)
-                # forward pass. The exported graphs have a dynamic sequence axis (the
-                # batch path relies on the same), so variable length is fine and this
-                # is the dominant single-classify latency win for short text.
-                padding=False,
-                return_tensors="np",
-                # BERT graphs require token_type_ids; ask for it explicitly so the
-                # transformers 5.x fast tokenizer (which omits it by default) emits it.
-                return_token_type_ids="token_type_ids" in loaded.input_names,
-            )
-        feed = _build_onnx_inputs(loaded, tokenized)
-        logits = loaded.session.run(None, feed)[0]
-        confidences, predicted_ids = _softmax_argmax(logits)
+        # No padding for a single sequence: pad to nothing, so a short text costs
+        # only its real token count instead of a fixed max_length (128) forward
+        # pass. The exported graphs have a dynamic sequence axis (the batch path
+        # relies on the same), so variable length is fine and this is the
+        # dominant single-classify latency win for short text.
+        combined = _combined_logits(d, [cleaned], padding=False)
+        confidences, predicted_ids = _softmax_argmax(combined)
 
         predicted_id = int(predicted_ids[0])
         confidence_val = float(confidences[0])
@@ -790,7 +975,6 @@ def _predict_batch(texts: list[str], d: LoadedDialect, lang: str) -> list[Classi
     prediction.
     """
     cfg = d.config
-    loaded = d.loaded
     cleaned = [cfg.preprocess_fn(t) for t in texts]
 
     valid_indices = [i for i, c in enumerate(cleaned) if c]
@@ -817,22 +1001,12 @@ def _predict_batch(texts: list[str], d: LoadedDialect, lang: str) -> list[Classi
             miss_indices.append(vi)
             miss_texts.append(cleaned[idx])
 
-    # Run inference only on cache misses
+    # Run inference only on cache misses. padding=True pads the miss batch to its
+    # own longest sequence (a dynamic axis the graphs support), so every member
+    # sees the same shaped batch.
     if miss_texts:
-        with d.tokenizer_lock:
-            tokenized = loaded.tokenizer(
-                miss_texts,
-                truncation=True,
-                max_length=loaded.max_length,
-                padding=True,
-                return_tensors="np",
-                # BERT graphs require token_type_ids; ask for it explicitly so the
-                # transformers 5.x fast tokenizer (which omits it by default) emits it.
-                return_token_type_ids="token_type_ids" in loaded.input_names,
-            )
-        feed = _build_onnx_inputs(loaded, tokenized)
-        logits = loaded.session.run(None, feed)[0]
-        confidences, predicted_ids = _softmax_argmax(logits)
+        combined = _combined_logits(d, miss_texts, padding=True)
+        confidences, predicted_ids = _softmax_argmax(combined)
 
         for j, vi in enumerate(miss_indices):
             idx = valid_indices[vi]

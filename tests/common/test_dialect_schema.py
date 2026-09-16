@@ -24,8 +24,22 @@ validate = validate_dialect_config
 
 
 def _valid_cfg() -> dict:
-    """A known-good config: the first shipped dialect's file."""
-    return json.loads(_dialect_file(ALL_DIALECTS[0]).read_text(encoding="utf-8"))
+    """A known-good SINGLE-MODEL config (one that declares ``hf_repo``): the
+    hf_repo cases below need one. Chosen positionally, with a fallback to the
+    first shipped file if every dialect were an ensemble. Returned as a deep copy
+    so a test's mutations never leak into the shared file cache."""
+    from tests.conftest import _DIALECT_FILES
+
+    singles = [cfg for cfg in _DIALECT_FILES.values() if "hf_repo" in cfg]
+    return copy.deepcopy((singles or list(_DIALECT_FILES.values()))[0])
+
+
+def _agg_cfg(**kwargs) -> dict:
+    """A known-good config with an aggregation block attached (combine method
+    and/or bias)."""
+    from tests.conftest import with_aggregation
+
+    return with_aggregation(_valid_cfg(), **kwargs)
 
 
 @pytest.mark.parametrize("dialect", ALL_DIALECTS)
@@ -193,3 +207,57 @@ def test_over_long_language_code_flagged():
         cfg["labels"][cat][long_lang] = dict(cfg["labels"][cat][any_lang])
     problems = validate("x", cfg)
     assert any("language code" in p and str(MAX_LANG_LEN) in p for p in problems), problems
+
+
+# =============================================================================
+# The aggregation block.
+#
+# A dialect is always one ``hf_repo``; whether that repo serves a single model
+# or an ensemble is a property of its snapshot's layout (a members/ subdir), not
+# of the file. The optional ``aggregation`` block tunes how members combine: a
+# method name (shape only, the engine owns the registry) and a per-sub-class
+# bias (shape plus the one offline cross-check, that its length == the sub-class
+# count).
+# =============================================================================
+
+
+def test_missing_hf_repo_flagged():
+    cfg = _valid_cfg()
+    del cfg["hf_repo"]
+    problems = validate("x", cfg)
+    assert any("missing required field" in p and "hf_repo" in p for p in problems)
+
+
+def test_aggregation_valid_block_ok():
+    n = len(_valid_cfg()["labels"]["sub_to_main"])
+    assert validate("x", _agg_cfg(method="logit_mean", bias=[0.1] * n)) == []
+
+
+def test_aggregation_not_an_object_flagged():
+    cfg = _valid_cfg()
+    cfg["aggregation"] = "logit_mean"
+    assert any("aggregation" in p for p in validate("x", cfg))
+
+
+def test_aggregation_bias_wrong_length_flagged():
+    n = len(_valid_cfg()["labels"]["sub_to_main"])
+    assert any("sub-classes" in p for p in validate("x", _agg_cfg(bias=[0.0] * (n + 1))))
+
+
+def test_aggregation_bias_non_number_flagged():
+    n = len(_valid_cfg()["labels"]["sub_to_main"])
+    assert any("bias" in p and "numbers" in p for p in validate("x", _agg_cfg(bias=["x"] * n)))
+
+
+def test_aggregation_bias_non_finite_flagged():
+    """json.load accepts NaN/Infinity; a non-finite bias would NaN the softmax at
+    serve time, so it must be rejected at the schema (commit/install) too."""
+    n = len(_valid_cfg()["labels"]["sub_to_main"])
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        vec = [0.0] * n
+        vec[0] = bad
+        assert any("finite" in p for p in validate("x", _agg_cfg(bias=vec))), bad
+
+
+def test_aggregation_method_must_be_nonempty_string():
+    assert any("aggregation.method" in p for p in validate("x", _agg_cfg(method="   ")))

@@ -2,16 +2,14 @@
 
 One service, one suite, one pytest run: the ML mocks install here at import,
 before anything touches ``app`` (the suite runs with no onnxruntime wheel and
-no model files). The suite discovers dialects from ``app/dialects/*.json``
-the same way the fetch command does, no dialect
-code or dialect-specific value is hardcoded anywhere, and the app-level
-fixtures build a throwaway models VOLUME from those same files, so the tests
-exercise the real startup scan against real configs with only the model load
-mocked out.
+no model files). The suite discovers dialects from ``app/dialects/*.json`` the
+same way the fetch command does. No dialect code or dialect-specific value is
+hardcoded anywhere, and the app-level fixtures build a throwaway models VOLUME
+from those same files, so the tests exercise the real startup scan against real
+configs with only the model load mocked out.
 """
 
 import json
-import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -53,11 +51,8 @@ def _load_all_dialect_files() -> dict:
     }
 
 
-# Everything derives from the dialect files, so the suite discovers them the
-# same way the fetch command does: a new app/dialects/<code>.json is
-# picked up by every parametrized test with no test edit. No dialect codes or
-# dialect-specific values are hardcoded anywhere in the suite; the tests
-# validate structure and wiring for WHATEVER files exist.
+# A new app/dialects/<code>.json is picked up by every parametrized test with no
+# test edit; the tests validate structure and wiring for WHATEVER files exist.
 _DIALECT_FILES = _load_all_dialect_files()
 ALL_DIALECTS = tuple(_DIALECT_FILES)
 
@@ -79,21 +74,63 @@ def labels_data() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def make_model_volume(root: Path, codes=ALL_DIALECTS) -> Path:
-    """Build a models directory shaped like a fetch-populated volume.
+def _write_model_unit(unit: Path) -> None:
+    """Write the file-level shape of one installed model directory: a dummy ONNX
+    graph and a training_config.json. The real load is mocked in these tests, so
+    the bytes never matter, only that the completeness rules see a graph."""
+    unit.mkdir(parents=True, exist_ok=True)
+    (unit / "model.onnx").write_bytes(b"not a real onnx graph")
+    (unit / "training_config.json").write_text(json.dumps({"max_length": 128}))
 
-    Per code: the repo dialect file installed as dialect.json, a dummy
-    model.onnx (the load itself is mocked), and a training_config.json. The
-    structure is derived from the real files, nothing hardcoded.
+
+def write_dialect_dir(root: Path, code: str, cfg: dict, member_names=None) -> Path:
+    """Materialize one dialect directory the way the fetch command would, from a
+    config dict: dialect.json at the top, and the model snapshot below it. Pass
+    ``member_names`` to build the ensemble layout (a model unit per name under
+    members/<name>/); omit it for a single flat model unit. The dialect file
+    itself carries only an ``hf_repo``, so which layout to build is the caller's
+    choice, mirroring that a repo's snapshot decides it in production.
+    """
+    from app.common.dialect_schema import MEMBERS_DIRNAME
+
+    d = root / code
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "dialect.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    if member_names:
+        for name in member_names:
+            _write_model_unit(d / MEMBERS_DIRNAME / name)
+    else:
+        _write_model_unit(d)
+    return d
+
+
+def make_model_volume(root: Path, codes=ALL_DIALECTS) -> Path:
+    """Build a models directory shaped like a fetch-populated volume, one flat
+    model directory per code, from the real dialect files. The ensemble layout
+    (a members/ tree) is exercised explicitly where it matters, via
+    write_dialect_dir(member_names=...).
     """
     root.mkdir(parents=True, exist_ok=True)
     for code in codes:
-        d = root / code
-        d.mkdir()
-        shutil.copyfile(_dialect_file(code), d / "dialect.json")
-        (d / "model.onnx").write_bytes(b"not a real onnx graph")
-        (d / "training_config.json").write_text(json.dumps({"max_length": 128}))
+        write_dialect_dir(root, code, _DIALECT_FILES[code])
     return root
+
+
+def with_aggregation(cfg: dict, *, bias=None, method=None) -> dict:
+    """A copy of ``cfg`` with an aggregation block attached (combine method and/or
+    per-sub-class bias). Everything else, including the single ``hf_repo``, is
+    preserved; the ensemble-ness of a dialect is its on-volume members/ layout,
+    not anything in the file, so this only tunes how the members combine.
+    """
+    out = dict(cfg)
+    aggregation: dict = {}
+    if method is not None:
+        aggregation["method"] = method
+    if bias is not None:
+        aggregation["bias"] = list(bias)
+    if aggregation:
+        out["aggregation"] = aggregation
+    return out
 
 
 def mock_loaded_model():

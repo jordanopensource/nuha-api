@@ -2,19 +2,39 @@
 
 A dialect is described by one JSON file (app/dialects/<code>.json in the repo,
 installed next to its model as <models dir>/<code>/dialect.json). Everything
-dialect-specific derives from it: name, hf_repo, languages and aliases,
-preprocessing, labels. This module is the one definition of that schema; the
-runtime registry, the fetch script, the pre-commit hook (via
-scripts/validate_dialects.py), and the tests all import it.
+dialect-specific derives from it: name, the model source (``hf_repo``), languages
+and aliases, preprocessing, labels, and how an ensemble's members are combined.
+
+A dialect is always one ``hf_repo``. Whether that repo serves a single model or
+an ensemble is a property of its snapshot, not of this file: a single-model
+snapshot has one model.onnx at the top, an ensemble snapshot has a ``members/``
+subdirectory with one complete model directory per member. The runtime tells the
+two apart by that directory on the volume, and treats a single model as an
+ensemble of one, so nothing downstream branches on the shape.
+
+An optional ``aggregation`` block tunes how the members' logits become a
+prediction. ``method`` names an entry in the engine's combine registry (a
+default applies when omitted); ``bias`` is a per-sub-class vector added to the
+combined logits before the argmax (this is where a dialect's bias lives, not in
+a sidecar file in the snapshot). Like ``preprocessing.type``, whether a named
+method actually exists is the engine's concern (its registry decides); the
+schema only checks shape, plus the one cross-check it can make offline: a bias
+must have exactly one entry per declared sub-class.
+
+This module is the one definition of that schema; the runtime registry, the
+fetch script, the pre-commit hook (via scripts/validate_dialects.py), and the
+tests all import it.
 
 Deliberately stdlib-only and network-free so the pre-commit hook stays fast and
 offline. Out of scope on purpose (each stays where it belongs): whether
-``preprocessing.type`` names a real preprocessor (that would couple the schema
-to the classifier's registry and break the "adding a preprocessor is a
-code-only change" rule; the app checks it at load, the tests check it for every
-file), and whether ``hf_repo`` actually resolves on HuggingFace (the network
-model test and the fetch command cover that).
+``preprocessing.type`` or ``aggregation.method`` name a real implementation
+(that would couple the schema to the engine's registries and break the "adding
+one is a code-only change" rule; the app checks it at load, the tests check it
+for every file), and whether ``hf_repo`` actually resolves on HuggingFace (the
+network model test and the fetch command cover that).
 """
+
+import math
 
 from app.common.config import MAX_LANG_LEN
 
@@ -25,6 +45,12 @@ from app.common.config import MAX_LANG_LEN
 # an infrastructure-sounding name. Rejected at validation time rather than
 # producing a name collision in tags or on the models volume.
 RESERVED_CODES = frozenset({"api", "model", "proxy"})
+
+# The subdirectory inside a dialect directory that holds one complete model
+# directory per ensemble member. Its presence on the volume is how the runtime
+# and the fetch command tell an ensemble snapshot from a single-model one. Named
+# here once so the engine, the registry, and the fetch command share the spelling.
+MEMBERS_DIRNAME = "members"
 
 
 def validate_dialect_config(code: str, cfg: dict) -> list[str]:
@@ -66,16 +92,11 @@ def validate_dialect_config(code: str, cfg: dict) -> list[str]:
     if not (isinstance(cfg["name"], str) and cfg["name"].strip()):
         bad("'name' must be a non-empty string")
 
-    repo = cfg["hf_repo"]
-    if not (isinstance(repo, str) and repo.strip()):
-        bad("'hf_repo' must be a non-empty string")
-    elif (
-        "://" in repo
-        or any(c.isspace() for c in repo)
-        or [p for p in repo.split("/") if p] != repo.split("/")
-        or repo.count("/") != 1
-    ):
-        bad(f"'hf_repo' must be a 'namespace/name' id, got {repo!r}")
+    problem = _check_repo(cfg["hf_repo"], "hf_repo")
+    if problem:
+        bad(problem)
+
+    _validate_aggregation(cfg.get("aggregation"), cfg["labels"], bad)
 
     langs = cfg["languages"]
     if not (isinstance(langs, dict) and langs):
@@ -128,6 +149,63 @@ def validate_dialect_config(code: str, cfg: dict) -> list[str]:
 
     problems.extend(_validate_labels(code, cfg["labels"], set(langs)))
     return problems
+
+
+def _check_repo(repo: object, label: str) -> str | None:
+    """The 'namespace/name' grammar an hf_repo id must follow."""
+    if not (isinstance(repo, str) and repo.strip()):
+        return f"'{label}' must be a non-empty string"
+    if (
+        "://" in repo
+        or any(c.isspace() for c in repo)
+        or [p for p in repo.split("/") if p] != repo.split("/")
+        or repo.count("/") != 1
+    ):
+        return f"'{label}' must be a 'namespace/name' id, got {repo!r}"
+    return None
+
+
+def _validate_aggregation(agg: object, labels: object, bad) -> None:
+    """The optional aggregation block: a combine method name (shape only, the
+    engine owns the registry) and a per-sub-class bias vector (shape plus the one
+    offline cross-check, that it has one entry per declared sub-class)."""
+    if agg is None:
+        return
+    if not isinstance(agg, dict):
+        bad("'aggregation' must be an object")
+        return
+    if "method" in agg and not (isinstance(agg["method"], str) and agg["method"].strip()):
+        bad("'aggregation.method' must be a non-empty string naming a combine method")
+    if "bias" in agg:
+        bias = agg["bias"]
+        expected = _sub_class_count(labels)
+        if not (isinstance(bias, list) and bias):
+            bad("'aggregation.bias' must be a non-empty list of numbers")
+        elif any(
+            isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+            for x in bias
+        ):
+            # json.load accepts NaN/Infinity; a non-finite bias would poison the
+            # softmax into NaN at serve time, so reject it here at commit/install.
+            bad("'aggregation.bias' must be a list of finite numbers")
+        elif expected is not None and len(bias) != expected:
+            bad(
+                f"'aggregation.bias' has {len(bias)} entries but the labels declare "
+                f"{expected} sub-classes"
+            )
+
+
+def _sub_class_count(labels: object) -> int | None:
+    """The number of sub-classes the labels declare (one model logit each), or
+    None when the labels are too malformed to tell (the labels validator reports
+    that separately)."""
+    if (
+        isinstance(labels, dict)
+        and isinstance(labels.get("sub_to_main"), dict)
+        and labels["sub_to_main"]
+    ):
+        return len(labels["sub_to_main"])
+    return None
 
 
 def _validate_labels(code: str, labels: object, declared_langs: set[str]) -> list[str]:

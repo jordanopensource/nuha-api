@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.common.config import MAX_LANG_LEN  # noqa: E402
-from app.common.dialect_schema import validate_dialect_config  # noqa: E402
+from app.common.dialect_schema import MEMBERS_DIRNAME, validate_dialect_config  # noqa: E402
 
 
 DIALECTS_DIR = ROOT / "app" / "dialects"
@@ -144,6 +144,29 @@ def _find_onnx(path: Path) -> Path | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _model_units(directory: Path) -> list[Path]:
+    """The model directories a snapshot occupies, mirroring the app's discovery
+    (app/classifier.py _discover_member_dirs): a present ``members/`` subdir is
+    AUTHORITATIVE, so the units are exactly its non-dot child dirs and an empty
+    members/ yields no units (incomplete), never a fall back to the flat root;
+    only when there is no members/ subdir is the single unit the directory
+    itself. Keeping this in step with the engine is what stops `add`/`ensure`
+    reporting an install the api then refuses to serve."""
+    members_root = directory / MEMBERS_DIRNAME
+    if members_root.is_dir():
+        return [p for p in members_root.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    return [directory]
+
+
+def _snapshot_complete(target: Path) -> bool:
+    """Every model unit is present and loadable on disk (one resolvable ONNX
+    graph AND a tokenizer artifact in each), in either the flat or the members/
+    layout. No units (an empty members/ dir) is incomplete, so an install is
+    held to exactly what the api needs to load the dialect."""
+    units = _model_units(target)
+    return bool(units) and all(_model_files_complete(unit) for unit in units)
+
+
 def _resolve_revision(repo: str, revision: str | None) -> str | None:
     """The exact commit sha this install will pin: the given revision resolved
     against the hub, else the repo head. None when the hub cannot answer (the
@@ -193,7 +216,7 @@ def _installed_matches(target: Path, cfg: dict) -> bool:
         installed_cfg = json.loads(dialect_json.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
-    return installed_cfg == cfg and _model_files_complete(target)
+    return installed_cfg == cfg and _snapshot_complete(target)
 
 
 def _write_config(target: Path, cfg: dict) -> None:
@@ -211,10 +234,12 @@ def install(
     resolved: str | None = None,
     pinned: bool = False,
 ) -> None:
-    """Download + activate one dialect: snapshot into a scanner-invisible
+    """Download + activate one dialect: snapshot the repo into a scanner-invisible
     staging dir, write dialect.json and the revision record, sanity-check the
-    graph, then activate with an atomic rename. Pass ``resolved`` when the
-    caller already resolved the revision, so the compare, the download, and
+    graph(s), then activate with an atomic rename. One snapshot covers both
+    layouts: a single-model repo lands a flat model.onnx, an ensemble repo lands
+    a members/ tree, and the graph check accepts either. Pass ``resolved`` when
+    the caller already resolved the revision, so the compare, the download, and
     the record share one resolution."""
     # Imported lazily: validation and `list` work without network intent, and
     # the tests mock this symbol.
@@ -241,9 +266,10 @@ def install(
             json.dumps({"hf_repo": cfg["hf_repo"], "revision": resolved, "pinned": pinned}) + "\n",
             encoding="utf-8",
         )
-        if _find_onnx(staging) is None:
+        if not _snapshot_complete(staging):
             raise _fail(
-                f"snapshot of {cfg['hf_repo']} holds no single ONNX graph; refusing to install it"
+                f"snapshot of {cfg['hf_repo']} is incomplete: every model needs an ONNX graph "
+                f"and a tokenizer (flat, or one per members/ dir); refusing to install it"
             )
     except BaseException:
         # A partial staging dir is invisible to the scanner either way; remove
@@ -295,6 +321,10 @@ def ensure(code: str, cfg: dict, update: bool, revision: str | None = None) -> s
       resolve the head and reinstall only when it differs from the recorded
       revision. When the hub cannot answer, staleness cannot be established,
       so the verified install is kept.
+
+    A single-model and an ensemble repo go down the same ladder: the whole
+    ensemble is one repo with one revision, and completeness accepts either the
+    flat or the members/ layout, so nothing here special-cases the shape.
     Returns what happened: installed, updated, or verified.
     """
     target = _models_dir() / code
@@ -311,7 +341,7 @@ def ensure(code: str, cfg: dict, update: bool, revision: str | None = None) -> s
         return "installed"
 
     if not _installed_matches(target, cfg):
-        if _model_files_complete(target) and meta.get("hf_repo") == cfg.get("hf_repo"):
+        if _snapshot_complete(target) and meta.get("hf_repo") == cfg.get("hf_repo"):
             print(f"{code}: config drifted; rewriting dialect.json in place")
             _write_config(target, cfg)
             return "updated"
