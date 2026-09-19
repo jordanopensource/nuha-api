@@ -13,6 +13,11 @@ repos:
   - hooks:
       - args:
           - --allow-multiple-documents
+          # Parse syntax only: the compose overlay carries the compose-spec
+          # !reset tag, which check-yaml's safe loader cannot construct.
+          # yamllint (--strict) and `docker compose config` still validate the
+          # structure and the semantics.
+          - --unsafe
         id: check-yaml
         types: ["yaml"]
       - id: check-toml
