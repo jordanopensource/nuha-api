@@ -1,0 +1,18 @@
+# Dev-host override: shrinks the api tier to fit an 8 GiB / 8-core box.
+# Ceilings, not reservations: actual RSS with the three shipped models stays
+# under the limit. Apply on top of the base file:
+#
+#   docker compose -f compose.yml -f compose.dev.yml up -d
+#
+# Compose merges `environment` by key, so the base file's MODELS_DIR survives.
+name: nuha-api
+
+services:
+  api:
+    environment:
+      - CLASSIFIER_WORKERS=1
+      - INFERENCE_QUEUE_SIZE=8
+    deploy:
+      resources:
+        limits:
+          memory: 7g

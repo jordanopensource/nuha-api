@@ -2,11 +2,11 @@
 
 This is the one part of the suite that reaches the network, and it runs by
 default (it is a real gate, not opt-in): a dialect file pointing at a missing,
-private, or non-ONNX repo is a hard failure here, caught before a build instead
-of during the Docker model-download stage.
+private, or non-ONNX repo is a hard failure here, caught in the suite instead
+of at install time when the fetch command tries to download it.
 
 The ONLY thing that skips these tests is genuine network unreachability (no
-route to HuggingFace at all) -- a transient outage must not turn image builds
+route to HuggingFace at all); a transient outage must not turn image builds
 red, and CI/build environments that have HF access (they download the models)
 will exercise the check for real. A reachable-but-wrong repo always fails.
 """
