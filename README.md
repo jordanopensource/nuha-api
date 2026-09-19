@@ -136,6 +136,9 @@ re-run the init service; the manual flow below stays the way to change the
 volume on a running stack. `restart` honors the 160s stop grace, so on a live
 stack it drains in-flight requests before the fresh startup scan.
 
+For a self-contained deployment with no platform edge, add the nginx overlay:
+`docker compose -f compose.yml -f compose.nginx.yml up -d` (see The edge below).
+
 Compose tags the image it builds locally `nuha-api:local`. To run a
 CI-published image from the registry instead, point `NUHA_API_IMAGE` at the
 repository and pick a release channel with `NUHA_API_TAG`:
@@ -432,11 +435,23 @@ the platform edge, restart them serially.
 
 ### The edge
 
-The api is the single public service, with no reverse proxy in the stack.
-TLS termination, per-IP rate limiting (the 429 in the status table), and
-slow-client handling belong to the platform edge in front of it. The app
-carries its own body-size cap, security headers, and overload shedding, so a
-directly exposed container still bounds itself.
+By default the api is the single public service, and the platform in front of it
+provides the edge: TLS termination, per-IP rate limiting (the 429 in the status
+table), and slow-client handling. The app still carries its own body-size cap,
+security headers, and overload shedding, so a directly exposed container bounds
+itself.
+
+For a deployment with no edge of its own, the `compose.nginx.yml` overlay bundles
+one:
+
+```bash
+docker compose -f compose.yml -f compose.nginx.yml up -d
+```
+
+That runs an nginx `proxy` in front of the api (a TLS termination point, per-IP
+and per-peer rate limiting, a body cap, security headers) and makes it the only
+published entry point. Adding a dialect stays a one-file change in either mode:
+the proxy routes every `/<dialect>/` to the api and carries no per-dialect config.
 
 ### Inference, concurrency, and overload
 
@@ -623,6 +638,8 @@ scripts/
 Dockerfile             Two-stage, model-free build (one image for everything)
 compose.yml            The api, models-init, and fetch services + the volume
 compose.dev.yml        8 GiB dev-host override
+compose.nginx.yml      Overlay that fronts the api with an nginx proxy
+nginx.conf             The proxy's config: TLS point, rate limits, routing
 .woodpecker/           CI pipelines (one image per channel)
 requirements.txt       Direct dependencies (onnxruntime, transformers, ...)
 requirements.lock      Generated, hashed lock installed by the Dockerfile
