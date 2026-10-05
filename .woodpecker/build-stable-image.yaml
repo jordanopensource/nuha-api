@@ -59,16 +59,13 @@ steps:
       - pip install --no-cache-dir -r requirements-test.txt
       - python -m pytest -q
 
-  # One image for the whole service; models stay out of it (the deploy's
-  # models-init service installs them onto the volume at startup). Published tags are
-  # channel-first: stable-api plus the checksum-pinned stable-<sha>-api for
-  # rollback, the only prefixes the registry's cleanup policy keeps. No bare
-  # tag is pushed: a deploy always states its channel explicitly via
-  # NUHA_API_TAG, and the sha-pinned tag gives one-command rollback. The `api`
-  # slot in the tag grammar is a RESERVED dialect code
-  # (app/common/dialect_schema.py), so it can never
-  # collide with a real dialect's 1.x image tag in this same repo. The build
-  # depends on every gate, so a drifted lock or a failing test blocks the push.
+  # One image for the whole service. Models stay out of it (the deploy's
+  # models-init service installs them onto the volume at startup). Published tags
+  # are the channel (`stable`) plus the checksum-pinned `stable-<sha>` for
+  # rollback, the only prefixes the registry's cleanup policy keeps. A deploy
+  # picks its channel via NUHA_API_TAG. The sha-pinned tag gives one-command
+  # rollback. The build depends on every gate, so a drifted lock or a failing
+  # test blocks the push.
   - name: build-stable-image
     image: woodpeckerci/plugin-docker-buildx:6.1.0@sha256:33263f74a593ddef5d4faeb39ae9f87db14d64d8aae8186284ae6e90d89298a4
     # Publish ONLY on push/manual events: pull_request events run the full test
@@ -80,8 +77,8 @@ steps:
       registry: *registry_url
       dockerfile: ./Dockerfile
       tags:
-        - stable-api
-        - stable-${CI_COMMIT_SHA}-api
+        - stable
+        - stable-${CI_COMMIT_SHA}
       username:
         from_secret: REGISTRY_USERNAME
       password:

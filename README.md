@@ -145,15 +145,13 @@ repository and pick a release channel with `NUHA_API_TAG`:
 
 ```bash
 NUHA_API_IMAGE=registry.cloud.josa.ngo/library/nuha-api \
-NUHA_API_TAG=stable-api docker compose up -d
+NUHA_API_TAG=stable docker compose up -d
 ```
 
-Tags are channel-first: CI publishes `stable-api` from `main` and `latest-api`
-from other branches, each with a checksum-pinned `<channel>-<sha>-api` variant
-for rollback, and deliberately no bare tag, so a deploy always states which
-channel it follows and a work-in-progress branch push can never overwrite what
-production pulls. The models are not in these images: a registry deploy's
-models-init service populates its own volume on first start.
+CI publishes `stable` from `main` and `latest` from other branches, each with
+a checksum-pinned `<channel>-<sha>` variant for rollback. A deploy states which
+channel it follows via `NUHA_API_TAG`. The models are not in these images: a
+registry deploy's models-init service populates its own volume on first start.
 
 There is a dev-host override that shrinks the api to fit an 8 GiB box:
 
